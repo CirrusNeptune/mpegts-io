@@ -8,7 +8,7 @@ use std::fmt::{Debug, Formatter};
 
 #[bitfield]
 #[derive(Debug)]
-pub struct PESHeader {
+pub struct PesHeader {
     pub start_code: B24,
     pub stream_id: B8,
     pub packet_length: B16,
@@ -16,7 +16,7 @@ pub struct PESHeader {
 
 #[bitfield]
 #[derive(Debug)]
-pub struct PESOptionalHeader {
+pub struct PesOptionalHeader {
     pub marker_bits: B2,
     pub scrambling_control: B2,
     pub priority: bool,
@@ -35,8 +35,8 @@ pub struct PESOptionalHeader {
 }
 
 pub struct Pes {
-    pub header: PESHeader,
-    pub optional_header: Option<PESOptionalHeader>,
+    pub header: PesHeader,
+    pub optional_header: Option<PesOptionalHeader>,
     pub pts: u64,
     pub dts: u64,
     pub data: Vec<u8>,
@@ -45,8 +45,8 @@ pub struct Pes {
 impl Pes {
     pub fn new(
         capacity: usize,
-        header: PESHeader,
-        optional_header: Option<PESOptionalHeader>,
+        header: PesHeader,
+        optional_header: Option<PesOptionalHeader>,
         pts: u64,
         dts: u64,
     ) -> Self {
@@ -66,11 +66,11 @@ impl SpanObject for Pes {
     }
 
     fn finish<'a>(self, pid: u16, parser: &mut MpegTsParser) -> Result<Payload<'a>> {
-        Ok(Payload::PES(self))
+        Ok(Payload::Pes(self))
     }
 
     fn pending<'a>(&self) -> Result<Payload<'a>> {
-        Ok(Payload::PESPending)
+        Ok(Payload::PesPending)
     }
 }
 
@@ -92,13 +92,13 @@ impl MpegTsParser {
         pid: u16,
         reader: &mut SliceReader<'a>,
     ) -> Result<Payload<'a>> {
-        let pes_header = PESHeader::from_bytes(*reader.read_array_ref::<6>()?);
+        let pes_header = PesHeader::from_bytes(*reader.read_array_ref::<6>()?);
         let pes_length = pes_header.packet_length() as usize;
         let mut optional_length = 0;
         let mut pts = 0;
         let mut dts = 0;
         let pes_optional = if pes_length >= 3 && pes_header.stream_id() != 0xBF {
-            let pes_optional = PESOptionalHeader::from_bytes(*reader.read_array_ref::<3>()?);
+            let pes_optional = PesOptionalHeader::from_bytes(*reader.read_array_ref::<3>()?);
             let additional_length = pes_optional.additional_header_length() as usize;
             optional_length = 3 + additional_length;
             let mut o_reader = reader.new_sub_reader(additional_length)?;
@@ -106,7 +106,7 @@ impl MpegTsParser {
             if pes_optional.has_pts() {
                 if o_reader.remaining_len() < 5 {
                     warn!("Short read of PTS");
-                    return Err(o_reader.make_error(ErrorDetails::BadPESHeader));
+                    return Err(o_reader.make_error(ErrorDetails::BadPesHeader));
                 }
                 pts = parse_timestamp(o_reader.read_array_ref::<5>()?);
             }
@@ -114,7 +114,7 @@ impl MpegTsParser {
             if pes_optional.has_dts() {
                 if o_reader.remaining_len() < 5 {
                     warn!("Short read of DTS");
-                    return Err(o_reader.make_error(ErrorDetails::BadPESHeader));
+                    return Err(o_reader.make_error(ErrorDetails::BadPesHeader));
                 }
                 dts = parse_timestamp(o_reader.read_array_ref::<5>()?);
             }

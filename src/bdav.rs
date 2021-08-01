@@ -3,25 +3,25 @@ use modular_bitfield_msb::prelude::*;
 
 #[bitfield]
 #[derive(Debug)]
-pub struct BDAVPacketHeader {
+pub struct BdavPacketHeader {
     pub cpi: B2,
     pub timestamp: B30,
 }
 
 #[derive(Debug)]
-pub struct BDAVPacket<'a> {
-    pub header: BDAVPacketHeader,
+pub struct BdavPacket<'a> {
+    pub header: BdavPacketHeader,
     pub packet: Packet<'a>,
 }
 
 #[derive(Default)]
-pub struct BDAVParser(MpegTsParser);
+pub struct BdavParser(MpegTsParser);
 
-impl BDAVParser {
-    pub fn parse<'a>(&mut self, packet: &'a [u8; 192]) -> Result<BDAVPacket<'a>> {
+impl BdavParser {
+    pub fn parse<'a>(&mut self, packet: &'a [u8; 192]) -> Result<BdavPacket<'a>> {
         let mut reader = SliceReader::new(packet);
-        let header = BDAVPacketHeader::from_bytes(*reader.read_array_ref::<4>()?);
-        Ok(BDAVPacket {
+        let header = BdavPacketHeader::from_bytes(*reader.read_array_ref::<4>()?);
+        Ok(BdavPacket {
             header,
             packet: self.0.parse_internal(reader)?,
         })

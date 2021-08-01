@@ -27,13 +27,13 @@ mod span;
 use span::{SpanBuilder, SpanObject};
 
 mod psi;
-use psi::{PsiBuilder, Psi};
+use psi::{Psi, PsiBuilder};
 
 mod pes;
 use pes::Pes;
 
 mod bdav;
-pub use bdav::BDAVParser;
+pub use bdav::BdavParser;
 
 const CRC: Crc<u32> = Crc::<u32>::new(&CRC_32_MPEG_2);
 type CrcDigest = Digest<'static, u32>;
@@ -43,9 +43,9 @@ pub enum ErrorDetails {
     PacketOverrun(usize),
     LostSync,
     BadAdaptationHeader,
-    BadPSIHeader,
-    BadPESHeader,
-    PSICRCMismatch,
+    BadPsiHeader,
+    BadPesHeader,
+    PsiCrcMismatch,
 }
 
 #[derive(Debug)]
@@ -114,14 +114,14 @@ macro_rules! pts_format_args {
 }
 
 #[derive(Default, Copy, Clone)]
-pub struct PCRTimestamp {
+pub struct PcrTimestamp {
     pub base: u64,
     pub extension: u16,
 }
 
-impl Debug for PCRTimestamp {
+impl Debug for PcrTimestamp {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("PCRTimestamp")
+        f.debug_struct("PcrTimestamp")
             .field("base", &pts_format_args!(self.base))
             .field("extension", &self.extension)
             .finish()
@@ -131,18 +131,18 @@ impl Debug for PCRTimestamp {
 #[derive(Debug)]
 pub struct AdaptationField {
     pub header: AdaptationFieldHeader,
-    pub pcr: Option<PCRTimestamp>,
-    pub opcr: Option<PCRTimestamp>,
+    pub pcr: Option<PcrTimestamp>,
+    pub opcr: Option<PcrTimestamp>,
 }
 
 #[derive(Debug)]
 pub enum Payload<'a> {
     Unknown,
     Raw(SliceReader<'a>),
-    PSIPending,
-    PSI(Psi),
-    PESPending,
-    PES(Pes),
+    PsiPending,
+    Psi(Psi),
+    PesPending,
+    Pes(Pes),
 }
 
 #[derive(Debug)]
@@ -172,7 +172,7 @@ fn parse_timestamp(b: &[u8; 5]) -> u64 {
     ts
 }
 
-fn parse_pcr(b: &[u8; 6]) -> PCRTimestamp {
+fn parse_pcr(b: &[u8; 6]) -> PcrTimestamp {
     let mut base: u64 = (b[0] as u64) << 25;
     base |= (b[1] as u64) << 17;
     base |= (b[2] as u64) << 9;
@@ -181,7 +181,7 @@ fn parse_pcr(b: &[u8; 6]) -> PCRTimestamp {
 
     let mut extension: u16 = ((b[4] & 0x1) as u16) << 8;
     extension |= b[5] as u16;
-    PCRTimestamp { base, extension }
+    PcrTimestamp { base, extension }
 }
 
 impl MpegTsParser {

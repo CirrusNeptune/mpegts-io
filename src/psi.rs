@@ -145,7 +145,7 @@ impl SpanObject for PsiBuilder {
         );
         if expected_hash != actual_hash {
             warn!("PSI hash mismatch for PID: {:x}", pid);
-            return Err(Error::new(0, ErrorDetails::PSICRCMismatch));
+            return Err(Error::new(0, ErrorDetails::PsiCrcMismatch));
         }
         self.data.truncate(len_minus_crc);
 
@@ -165,14 +165,14 @@ impl SpanObject for PsiBuilder {
                 }
                 pat_vec.push(entry);
             }
-            Ok(Payload::PSI(Psi {
+            Ok(Payload::Psi(Psi {
                 header: self.header,
                 table_syntax: self.table_syntax,
                 data: PsiData::Pat(pat_vec),
             }))
         } else if parser.nit_pid == pid {
             /* NIT */
-            Ok(Payload::PSI(Psi {
+            Ok(Payload::Psi(Psi {
                 header: self.header,
                 table_syntax: self.table_syntax,
                 data: PsiData::Nit(self.data),
@@ -207,14 +207,14 @@ impl SpanObject for PsiBuilder {
                 }
                 pmt.es_infos.push(es_info);
             }
-            Ok(Payload::PSI(Psi {
+            Ok(Payload::Psi(Psi {
                 header: self.header,
                 table_syntax: self.table_syntax,
                 data: PsiData::Pmt(pmt),
             }))
         } else {
             /* Unhandled table type; keep data raw */
-            Ok(Payload::PSI(Psi {
+            Ok(Payload::Psi(Psi {
                 header: self.header,
                 table_syntax: self.table_syntax,
                 data: PsiData::Raw(self.data),
@@ -223,7 +223,7 @@ impl SpanObject for PsiBuilder {
     }
 
     fn pending<'a>(&self) -> Result<Payload<'a>> {
-        Ok(Payload::PSIPending)
+        Ok(Payload::PsiPending)
     }
 }
 
@@ -235,18 +235,18 @@ impl MpegTsParser {
     ) -> Result<Payload<'a>> {
         if reader.remaining_len() < 1 {
             warn!("Short read of PSI pointer field");
-            return Err(reader.make_error(ErrorDetails::BadPSIHeader));
+            return Err(reader.make_error(ErrorDetails::BadPsiHeader));
         }
         let pointer_field = reader.read(1)?[0];
         if reader.remaining_len() < pointer_field as usize {
             warn!("Short read of PSI pointer filler");
-            return Err(reader.make_error(ErrorDetails::BadPSIHeader));
+            return Err(reader.make_error(ErrorDetails::BadPsiHeader));
         }
         reader.skip(pointer_field as usize)?;
 
         if reader.remaining_len() < 3 {
             warn!("Short read of PSI header");
-            return Err(reader.make_error(ErrorDetails::BadPSIHeader));
+            return Err(reader.make_error(ErrorDetails::BadPsiHeader));
         }
         let mut hasher = CRC.digest();
         let psi_header_bytes = reader.read_array_ref::<3>()?;
@@ -257,7 +257,7 @@ impl MpegTsParser {
         if section_length > 0 {
             if reader.remaining_len() < 5 {
                 warn!("Short read of PSI table syntax");
-                return Err(reader.make_error(ErrorDetails::BadPSIHeader));
+                return Err(reader.make_error(ErrorDetails::BadPsiHeader));
             }
             let psi_table_syntax_bytes = reader.read_array_ref::<5>()?;
             hasher.update(psi_table_syntax_bytes);
@@ -267,7 +267,7 @@ impl MpegTsParser {
             if table_length < 4 {
                 /* Must have length to read at least the CRC32 */
                 warn!("Insufficient table length");
-                return Err(reader.make_error(ErrorDetails::BadPSIHeader));
+                return Err(reader.make_error(ErrorDetails::BadPsiHeader));
             }
 
             self.start_span(
