@@ -1,18 +1,18 @@
-use super::{MPEGTSParser, PSIBuilder, Payload, Result, SliceReader, PES};
+use super::{MpegTsParser, PsiBuilder, Payload, Result, SliceReader, Pes};
 use enum_dispatch::enum_dispatch;
 use log::warn;
 
 #[enum_dispatch]
 pub(crate) trait SpanObject {
     fn extend_from_slice(&mut self, slice: &[u8]);
-    fn finish<'a>(self, pid: u16, parser: &mut MPEGTSParser) -> Result<Payload<'a>>;
+    fn finish<'a>(self, pid: u16, parser: &mut MpegTsParser) -> Result<Payload<'a>>;
     fn pending<'a>(&self) -> Result<Payload<'a>>;
 }
 
 #[enum_dispatch(SpanObject)]
 pub(crate) enum Span {
-    PSI(PSIBuilder),
-    PES(PES),
+    Psi(PsiBuilder),
+    Pes(Pes),
 }
 
 pub(crate) struct SpanBuilder {
@@ -43,7 +43,7 @@ impl SpanBuilder {
         }
     }
 
-    pub fn finish<'a>(self, pid: u16, parser: &mut MPEGTSParser) -> Result<Payload<'a>> {
+    pub fn finish<'a>(self, pid: u16, parser: &mut MpegTsParser) -> Result<Payload<'a>> {
         assert_eq!(self.remaining, 0);
         self.span.finish(pid, parser)
     }
@@ -53,7 +53,7 @@ impl SpanBuilder {
     }
 }
 
-impl MPEGTSParser {
+impl MpegTsParser {
     pub(crate) fn start_span<'a, T: SpanObject>(
         &mut self,
         obj: T,

@@ -27,10 +27,10 @@ mod span;
 use span::{SpanBuilder, SpanObject};
 
 mod psi;
-use psi::{PSIBuilder, PSI};
+use psi::{PsiBuilder, Psi};
 
 mod pes;
-use pes::PES;
+use pes::Pes;
 
 mod bdav;
 pub use bdav::BDAVParser;
@@ -140,9 +140,9 @@ pub enum Payload<'a> {
     Unknown,
     Raw(SliceReader<'a>),
     PSIPending,
-    PSI(PSI),
+    PSI(Psi),
     PESPending,
-    PES(PES),
+    PES(Pes),
 }
 
 #[derive(Debug)]
@@ -153,7 +153,7 @@ pub struct Packet<'a> {
 }
 
 #[derive(Default)]
-pub struct MPEGTSParser {
+pub struct MpegTsParser {
     pending_spans: HashMap<u16, SpanBuilder>,
     known_pmt_pids: HashSet<u16>,
     nit_pid: u16,
@@ -184,7 +184,7 @@ fn parse_pcr(b: &[u8; 6]) -> PCRTimestamp {
     PCRTimestamp { base, extension }
 }
 
-impl MPEGTSParser {
+impl MpegTsParser {
     fn read_adaptation_field(&mut self, reader: &mut SliceReader) -> Result<AdaptationField> {
         let mut out = AdaptationField {
             header: AdaptationFieldHeader::from_bytes(*reader.read_array_ref::<2>()?),
@@ -192,7 +192,7 @@ impl MPEGTSParser {
             opcr: None,
         };
         let adaptation_field_length = out.header.length() as usize;
-        if adaptation_field_length < 1 || adaptation_field_length > 183 {
+        if !(1..=183).contains(&adaptation_field_length) {
             warn!("Bad adaptation field length");
             return Err(reader.make_error(ErrorDetails::BadAdaptationHeader));
         }

@@ -1,4 +1,4 @@
-use super::{MPEGTSParser, Packet, Result, SliceReader};
+use super::{MpegTsParser, Packet, Result, SliceReader};
 use modular_bitfield_msb::prelude::*;
 
 #[bitfield]
@@ -15,7 +15,7 @@ pub struct BDAVPacket<'a> {
 }
 
 #[derive(Default)]
-pub struct BDAVParser(MPEGTSParser);
+pub struct BDAVParser(MpegTsParser);
 
 impl BDAVParser {
     pub fn parse<'a>(&mut self, packet: &'a [u8; 192]) -> Result<BDAVPacket<'a>> {

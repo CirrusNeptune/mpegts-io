@@ -1,5 +1,5 @@
 use super::{
-    parse_timestamp, pts_format_args, ErrorDetails, MPEGTSParser, Payload, Result, SliceReader,
+    parse_timestamp, pts_format_args, ErrorDetails, MpegTsParser, Payload, Result, SliceReader,
     SpanObject,
 };
 use log::warn;
@@ -34,7 +34,7 @@ pub struct PESOptionalHeader {
     pub additional_header_length: B8,
 }
 
-pub struct PES {
+pub struct Pes {
     pub header: PESHeader,
     pub optional_header: Option<PESOptionalHeader>,
     pub pts: u64,
@@ -42,7 +42,7 @@ pub struct PES {
     pub data: Vec<u8>,
 }
 
-impl PES {
+impl Pes {
     pub fn new(
         capacity: usize,
         header: PESHeader,
@@ -60,12 +60,12 @@ impl PES {
     }
 }
 
-impl SpanObject for PES {
+impl SpanObject for Pes {
     fn extend_from_slice(&mut self, slice: &[u8]) {
         self.data.extend_from_slice(slice);
     }
 
-    fn finish<'a>(self, pid: u16, parser: &mut MPEGTSParser) -> Result<Payload<'a>> {
+    fn finish<'a>(self, pid: u16, parser: &mut MpegTsParser) -> Result<Payload<'a>> {
         Ok(Payload::PES(self))
     }
 
@@ -74,7 +74,7 @@ impl SpanObject for PES {
     }
 }
 
-impl Debug for PES {
+impl Debug for Pes {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PES")
             .field("header", &self.header)
@@ -86,7 +86,7 @@ impl Debug for PES {
     }
 }
 
-impl MPEGTSParser {
+impl MpegTsParser {
     pub(crate) fn start_pes<'a>(
         &mut self,
         pid: u16,
@@ -127,7 +127,7 @@ impl MPEGTSParser {
 
         let span_length = pes_length - optional_length;
         self.start_span(
-            PES::new(span_length, pes_header, pes_optional, pts, dts),
+            Pes::new(span_length, pes_header, pes_optional, pts, dts),
             span_length,
             pid,
             reader,
