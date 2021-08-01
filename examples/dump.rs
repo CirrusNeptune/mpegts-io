@@ -2,7 +2,13 @@ use mpegts_io::{BdavParser, Payload};
 use pretty_env_logger;
 use std::env;
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{Read, Result, Seek, SeekFrom};
+
+fn file_size(file: &mut File) -> Result<u64> {
+    let len = file.seek(SeekFrom::End(0))?;
+    file.seek(SeekFrom::Start(0))?;
+    Ok(len)
+}
 
 fn main() {
     pretty_env_logger::init();
@@ -11,11 +17,8 @@ fn main() {
         panic!("No file argument");
     }
     let file_path = args.skip(1).next().unwrap();
-
     let mut file = File::open(file_path).expect("unable to open!");
-    let len = file.seek(SeekFrom::End(0)).expect("unable to get file size");
-    file.seek(SeekFrom::Start(0)).expect("unable to get file size");
-    let num_packets = len / 192;
+    let num_packets = file_size(&mut file).expect("unable to get file size") / 192;
     let mut parser = BdavParser::default();
     for _ in 0..num_packets {
         let mut packet = [0_u8; 192];
