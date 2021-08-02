@@ -3,30 +3,30 @@ use enum_dispatch::enum_dispatch;
 use log::warn;
 
 #[enum_dispatch]
-pub(crate) trait SpanObject {
+pub(crate) trait PayloadUnitObject {
     fn extend_from_slice(&mut self, slice: &[u8]);
     fn finish<'a>(self, pid: u16, parser: &mut MpegTsParser) -> Result<Payload<'a>>;
     fn pending<'a>(&self) -> Result<Payload<'a>>;
 }
 
-#[enum_dispatch(SpanObject)]
-pub(crate) enum Span {
+#[enum_dispatch(PayloadUnitObject)]
+pub(crate) enum PayloadUnit {
     Psi(PsiBuilder),
     Pes(Pes),
 }
 
-pub(crate) struct SpanBuilder {
-    span: Span,
+pub(crate) struct PayloadUnitBuilder {
+    unit: PayloadUnit,
     remaining: usize,
 }
 
-impl SpanBuilder {
-    pub fn new<T: SpanObject>(obj: T, obj_length: usize) -> Self
+impl PayloadUnitBuilder {
+    pub fn new<T: PayloadUnitObject>(obj: T, obj_length: usize) -> Self
     where
-        Span: From<T>,
+        PayloadUnit: From<T>,
     {
         Self {
-            span: obj.into(),
+            unit: obj.into(),
             remaining: obj_length,
         }
     }
@@ -34,10 +34,10 @@ impl SpanBuilder {
     pub fn append(&mut self, reader: &mut SliceReader) -> Result<bool> {
         if reader.remaining_len() <= self.remaining {
             self.remaining -= reader.remaining_len();
-            self.span.extend_from_slice(reader.read_to_end()?);
+            self.unit.extend_from_slice(reader.read_to_end()?);
             Ok(self.remaining == 0)
         } else {
-            self.span.extend_from_slice(reader.read(self.remaining)?);
+            self.unit.extend_from_slice(reader.read(self.remaining)?);
             self.remaining = 0;
             Ok(true)
         }
@@ -45,16 +45,16 @@ impl SpanBuilder {
 
     pub fn finish<'a>(self, pid: u16, parser: &mut MpegTsParser) -> Result<Payload<'a>> {
         assert_eq!(self.remaining, 0);
-        self.span.finish(pid, parser)
+        self.unit.finish(pid, parser)
     }
 
     pub fn pending<'a>(&self) -> Result<Payload<'a>> {
-        self.span.pending()
+        self.unit.pending()
     }
 }
 
 impl MpegTsParser {
-    pub(crate) fn start_span<'a, T: SpanObject>(
+    pub(crate) fn start_payload_unit<'a, T: PayloadUnitObject>(
         &mut self,
         obj: T,
         length: usize,
@@ -62,34 +62,37 @@ impl MpegTsParser {
         reader: &mut SliceReader<'a>,
     ) -> Result<Payload<'a>>
     where
-        Span: From<T>,
+        PayloadUnit: From<T>,
     {
-        let mut span_builder = SpanBuilder::new(obj, length);
-        if span_builder.append(reader)? {
-            span_builder.finish(pid, self)
+        let mut builder = PayloadUnitBuilder::new(obj, length);
+        if builder.append(reader)? {
+            builder.finish(pid, self)
         } else {
-            let pending = span_builder.pending();
-            self.pending_spans.insert(pid, span_builder);
+            let pending = builder.pending();
+            self.pending_payload_units.insert(pid, builder);
             pending
         }
     }
 
-    pub(crate) fn continue_span<'a>(
+    pub(crate) fn continue_payload_unit<'a>(
         &mut self,
         pid: u16,
         reader: &mut SliceReader<'a>,
     ) -> Result<Payload<'a>> {
-        match self.pending_spans.get_mut(&pid) {
+        match self.pending_payload_units.get_mut(&pid) {
             Some(pes_state) => {
                 if pes_state.append(reader)? {
-                    self.pending_spans.remove(&pid).unwrap().finish(pid, self)
+                    self.pending_payload_units
+                        .remove(&pid)
+                        .unwrap()
+                        .finish(pid, self)
                 } else {
                     pes_state.pending()
                 }
             }
             None => {
                 warn!(
-                    "Discarding payload of unknown span continuation PID: {:x}",
+                    "Discarding payload unit of unknown continuation PID: {:x}",
                     pid
                 );
                 Ok(Payload::Unknown)

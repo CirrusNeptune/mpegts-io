@@ -1,5 +1,6 @@
 use super::{
-    CrcDigest, Error, ErrorDetails, MpegTsParser, Payload, Result, SliceReader, SpanObject, CRC,
+    read_bitfield, CrcDigest, Error, ErrorDetails, MpegTsParser, Payload, PayloadUnitObject,
+    Result, SliceReader, CRC,
 };
 use log::warn;
 use modular_bitfield_msb::prelude::*;
@@ -44,13 +45,11 @@ pub struct Descriptor {
 
 impl Descriptor {
     pub fn new_from_reader(reader: &mut SliceReader) -> Result<Self> {
-        let tag_len = reader.read_array_ref::<2>()?;
+        let tag = reader.read_u8()?;
+        let len = reader.read_u8()?;
         let mut data = SmallVec::<[u8; 8]>::new();
-        data.extend_from_slice(reader.read(tag_len[1] as usize)?);
-        Ok(Self {
-            tag: tag_len[0],
-            data,
-        })
+        data.extend_from_slice(reader.read(len as usize)?);
+        Ok(Self { tag, data })
     }
 }
 
@@ -95,7 +94,6 @@ pub enum PsiData {
     Raw(Vec<u8>),
     Pat(Vec<PatEntry>),
     Pmt(Pmt),
-    Nit(Vec<u8>),
 }
 
 #[derive(Debug)]
@@ -109,7 +107,7 @@ pub struct PsiBuilder {
     header: PsiHeader,
     table_syntax: Option<PsiTableSyntax>,
     data: Vec<u8>,
-    hasher: CrcDigest,
+    hasher: Option<CrcDigest>,
 }
 
 impl PsiBuilder {
@@ -123,12 +121,69 @@ impl PsiBuilder {
             header,
             table_syntax,
             data: Vec::with_capacity(capacity),
-            hasher,
+            hasher: Some(hasher),
         }
+    }
+
+    fn finish_substitute_data<'a>(mut self, data: PsiData) -> Result<Payload<'a>> {
+        Ok(Payload::Psi(Psi {
+            header: self.header,
+            table_syntax: self.table_syntax,
+            data,
+        }))
+    }
+
+    fn finish_keep_raw_data<'a>(mut self) -> Result<Payload<'a>> {
+        Ok(Payload::Psi(Psi {
+            header: self.header,
+            table_syntax: self.table_syntax,
+            data: PsiData::Raw(self.data),
+        }))
+    }
+
+    fn finish_pat<'a>(mut self, parser: &mut MpegTsParser) -> Result<Payload<'a>> {
+        parser.known_pmt_pids.clear();
+        let mut reader = SliceReader::new(self.data.as_slice());
+        let mut pat_vec = Vec::with_capacity(reader.remaining_len() / 4);
+        while reader.remaining_len() >= 4 {
+            let entry = read_bitfield!(reader, PatEntry);
+            parser.known_pmt_pids.insert(entry.program_map_pid());
+            pat_vec.push(entry);
+        }
+        self.finish_substitute_data(PsiData::Pat(pat_vec))
+    }
+
+    fn finish_pmt<'a>(mut self, parser: &mut MpegTsParser) -> Result<Payload<'a>> {
+        let mut reader = SliceReader::new(self.data.as_slice());
+        let header = read_bitfield!(reader, PmtHeader);
+        let mut pmt = Pmt {
+            header,
+            program_descriptors: Vec::new(),
+            es_infos: Vec::new(),
+        };
+        let mut info_reader = reader.new_sub_reader(pmt.header.program_info_length() as usize)?;
+        while info_reader.remaining_len() > 0 {
+            let descriptor = Descriptor::new_from_reader(&mut info_reader)?;
+            pmt.program_descriptors.push(descriptor);
+        }
+        while reader.remaining_len() > 0 {
+            let es_header = read_bitfield!(reader, ElementaryStreamInfoHeader);
+            let mut es_info = ElementaryStreamInfo {
+                header: es_header,
+                es_descriptors: SmallVec::new(),
+            };
+            let mut es_reader = reader.new_sub_reader(es_info.header.es_info_length() as usize)?;
+            while es_reader.remaining_len() > 0 {
+                let descriptor = Descriptor::new_from_reader(&mut es_reader)?;
+                es_info.es_descriptors.push(descriptor);
+            }
+            pmt.es_infos.push(es_info);
+        }
+        self.finish_substitute_data(PsiData::Pmt(pmt))
     }
 }
 
-impl SpanObject for PsiBuilder {
+impl PayloadUnitObject for PsiBuilder {
     fn extend_from_slice(&mut self, slice: &[u8]) {
         self.data.extend_from_slice(slice);
     }
@@ -136,13 +191,10 @@ impl SpanObject for PsiBuilder {
     fn finish<'a>(mut self, pid: u16, parser: &mut MpegTsParser) -> Result<Payload<'a>> {
         /* Validate using CRC32 */
         let len_minus_crc = self.data.len() - 4;
-        self.hasher.update(&self.data[..len_minus_crc]);
-        let actual_hash = self.hasher.finalize();
-        let expected_hash = u32::from_be_bytes(
-            *SliceReader::new(&self.data[len_minus_crc..])
-                .read_array_ref::<4>()
-                .unwrap(),
-        );
+        let mut hasher = self.hasher.take().expect("PSI hasher not set");
+        hasher.update(&self.data[..len_minus_crc]);
+        let actual_hash = hasher.finalize();
+        let expected_hash = SliceReader::new(&self.data[len_minus_crc..]).read_be_u32()?;
         if expected_hash != actual_hash {
             warn!("PSI hash mismatch for PID: {:x}", pid);
             return Err(Error::new(0, ErrorDetails::PsiCrcMismatch));
@@ -150,75 +202,18 @@ impl SpanObject for PsiBuilder {
         self.data.truncate(len_minus_crc);
 
         /* Process table based on known type */
-        if pid == 0 && self.header.table_id() == 0 {
+        if self.header.private_bit() {
+            /* Private tables are not defined in ISO/IEC 13818-1 */
+            self.finish_keep_raw_data()
+        } else if pid == 0 && self.header.table_id() == 0 {
             /* PAT */
-            parser.nit_pid = 0x0010;
-            parser.known_pmt_pids.clear();
-            let mut reader = SliceReader::new(self.data.as_slice());
-            let mut pat_vec = Vec::with_capacity(reader.remaining_len() / 4);
-            while reader.remaining_len() >= 4 {
-                let entry = PatEntry::from_bytes(*reader.read_array_ref::<4>().unwrap());
-                if entry.program_num() == 0 {
-                    parser.nit_pid = entry.program_map_pid();
-                } else {
-                    parser.known_pmt_pids.insert(entry.program_map_pid());
-                }
-                pat_vec.push(entry);
-            }
-            Ok(Payload::Psi(Psi {
-                header: self.header,
-                table_syntax: self.table_syntax,
-                data: PsiData::Pat(pat_vec),
-            }))
-        } else if parser.nit_pid == pid {
-            /* NIT */
-            Ok(Payload::Psi(Psi {
-                header: self.header,
-                table_syntax: self.table_syntax,
-                data: PsiData::Nit(self.data),
-            }))
+            self.finish_pat(parser)
         } else if parser.known_pmt_pids.contains(&pid) {
             /* PMT */
-            let mut reader = SliceReader::new(self.data.as_slice());
-            let header = PmtHeader::from_bytes(*reader.read_array_ref::<4>()?);
-            let mut pmt = Pmt {
-                header,
-                program_descriptors: Vec::new(),
-                es_infos: Vec::new(),
-            };
-            let mut info_reader =
-                reader.new_sub_reader(pmt.header.program_info_length() as usize)?;
-            while info_reader.remaining_len() > 0 {
-                let descriptor = Descriptor::new_from_reader(&mut info_reader)?;
-                pmt.program_descriptors.push(descriptor);
-            }
-            while reader.remaining_len() > 0 {
-                let es_header =
-                    ElementaryStreamInfoHeader::from_bytes(*reader.read_array_ref::<5>()?);
-                let mut es_info = ElementaryStreamInfo {
-                    header: es_header,
-                    es_descriptors: SmallVec::new(),
-                };
-                let mut es_reader =
-                    reader.new_sub_reader(es_info.header.es_info_length() as usize)?;
-                while es_reader.remaining_len() > 0 {
-                    let descriptor = Descriptor::new_from_reader(&mut es_reader)?;
-                    es_info.es_descriptors.push(descriptor);
-                }
-                pmt.es_infos.push(es_info);
-            }
-            Ok(Payload::Psi(Psi {
-                header: self.header,
-                table_syntax: self.table_syntax,
-                data: PsiData::Pmt(pmt),
-            }))
+            self.finish_pmt(parser)
         } else {
-            /* Unhandled table type; keep data raw */
-            Ok(Payload::Psi(Psi {
-                header: self.header,
-                table_syntax: self.table_syntax,
-                data: PsiData::Raw(self.data),
-            }))
+            /* Unhandled table type (CAT?); keep data raw */
+            self.finish_keep_raw_data()
         }
     }
 
@@ -270,7 +265,7 @@ impl MpegTsParser {
                 return Err(reader.make_error(ErrorDetails::BadPsiHeader));
             }
 
-            self.start_span(
+            self.start_payload_unit(
                 PsiBuilder::new(table_length, psi_header, Some(psi_table_syntax), hasher),
                 table_length,
                 pid,

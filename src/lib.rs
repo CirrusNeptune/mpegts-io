@@ -18,19 +18,21 @@ use smallvec::SmallVec;
 use std::collections::{HashMap, HashSet};
 use std::convert::From;
 use std::fmt::{Debug, Formatter};
+use std::ops::Range;
+use std::rc::Rc;
 use std::result;
 
 mod slice_reader;
 use slice_reader::SliceReader;
 
-mod span;
-use span::{SpanBuilder, SpanObject};
+mod payload_unit;
+use payload_unit::{PayloadUnitBuilder, PayloadUnitObject};
 
 mod psi;
 use psi::{Psi, PsiBuilder};
 
 mod pes;
-use pes::Pes;
+use pes::{Pes, PesUnitObject, PesUnitObjectFactory};
 
 mod bdav;
 pub use bdav::BdavParser;
@@ -46,6 +48,7 @@ pub enum ErrorDetails {
     BadPsiHeader,
     BadPesHeader,
     PsiCrcMismatch,
+    PesError(String),
 }
 
 #[derive(Debug)]
@@ -154,9 +157,9 @@ pub struct Packet<'a> {
 
 #[derive(Default)]
 pub struct MpegTsParser {
-    pending_spans: HashMap<u16, SpanBuilder>,
+    pes_unit_factories: HashMap<u16, Rc<dyn PesUnitObjectFactory>>,
+    pending_payload_units: HashMap<u16, PayloadUnitBuilder>,
     known_pmt_pids: HashSet<u16>,
-    nit_pid: u16,
 }
 
 fn is_pes(b: &[u8; 3]) -> bool {
@@ -185,9 +188,23 @@ fn parse_pcr(b: &[u8; 6]) -> PcrTimestamp {
 }
 
 impl MpegTsParser {
+    pub fn register_pes_unit_factory(&mut self, pid: u16, factory: Rc<dyn PesUnitObjectFactory>) {
+        self.pes_unit_factories.insert(pid, factory);
+    }
+
+    pub fn register_pes_unit_factory_iter<I: Iterator<Item = u16>>(
+        &mut self,
+        pids: I,
+        factory: Rc<dyn PesUnitObjectFactory>,
+    ) {
+        for pid in pids {
+            self.register_pes_unit_factory(pid, factory.clone());
+        }
+    }
+
     fn read_adaptation_field(&mut self, reader: &mut SliceReader) -> Result<AdaptationField> {
         let mut out = AdaptationField {
-            header: AdaptationFieldHeader::from_bytes(*reader.read_array_ref::<2>()?),
+            header: read_bitfield!(reader, AdaptationFieldHeader),
             pcr: None,
             opcr: None,
         };
@@ -225,14 +242,14 @@ impl MpegTsParser {
         mut reader: SliceReader<'a>,
     ) -> Result<Payload<'a>> {
         if pusi {
-            /* Make sure we're not starting an already-started span */
-            if self.pending_spans.contains_key(&pid) {
-                warn!("Discarding unfinished span packet on PID: {:x}", pid);
-                self.pending_spans.remove(&pid);
+            /* Make sure we're not starting an already-started unit */
+            if self.pending_payload_units.contains_key(&pid) {
+                warn!("Discarding unfinished unit packet on PID: {:x}", pid);
+                self.pending_payload_units.remove(&pid);
             }
 
             /* Check for PAT/PMT/NIT */
-            if pid == 0 || self.known_pmt_pids.contains(&pid) || self.nit_pid == pid {
+            if pid == 0 || self.known_pmt_pids.contains(&pid) {
                 self.start_psi(pid, &mut reader)
             }
             /* Check for PES if enough payload is present */
@@ -244,15 +261,15 @@ impl MpegTsParser {
                 Ok(Payload::Raw(reader))
             }
         } else {
-            /* Attempt span continuation */
-            self.continue_span(pid, &mut reader)
+            /* Attempt unit continuation */
+            self.continue_payload_unit(pid, &mut reader)
         }
     }
 
     pub(crate) fn parse_internal<'a>(&mut self, mut reader: SliceReader<'a>) -> Result<Packet<'a>> {
         /* Start with header and verify sync */
         let mut out = Packet {
-            header: PacketHeader::from_bytes(*reader.read_array_ref::<4>()?),
+            header: read_bitfield!(reader, PacketHeader),
             adaptation_field: None,
             payload: None,
         };

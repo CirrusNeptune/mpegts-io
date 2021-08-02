@@ -1,10 +1,11 @@
 use super::{
-    parse_timestamp, pts_format_args, ErrorDetails, MpegTsParser, Payload, Result, SliceReader,
-    SpanObject,
+    parse_timestamp, pts_format_args, read_bitfield, ErrorDetails, MpegTsParser, Payload,
+    PayloadUnitObject, Result, SliceReader,
 };
 use log::warn;
 use modular_bitfield_msb::prelude::*;
-use std::fmt::{Debug, Formatter};
+use std::fmt::{Arguments, Debug, DebugStruct, Formatter};
+use std::rc::Rc;
 
 #[bitfield]
 #[derive(Debug)]
@@ -34,38 +35,75 @@ pub struct PesOptionalHeader {
     pub additional_header_length: B8,
 }
 
+pub trait PesUnitObject: Debug {
+    fn extend_from_slice(&mut self, slice: &[u8]);
+    fn finish(&mut self, pid: u16, parser: &mut MpegTsParser) -> Result<()>;
+}
+
+pub trait PesUnitObjectFactory {
+    fn construct(&self, pid: u16, capacity: usize) -> Box<dyn PesUnitObject>;
+}
+
+#[derive(Default)]
+struct RawPesData(Vec<u8>);
+
+impl RawPesData {
+    pub fn new(capacity: usize) -> Self {
+        Self(Vec::with_capacity(capacity))
+    }
+}
+
+impl Debug for RawPesData {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RawPesData")
+            .field("len", &self.0.len())
+            .finish()
+    }
+}
+
+impl PesUnitObject for RawPesData {
+    fn extend_from_slice(&mut self, slice: &[u8]) {
+        self.0.extend_from_slice(slice);
+    }
+
+    fn finish(&mut self, pid: u16, parser: &mut MpegTsParser) -> Result<()> {
+        Ok(())
+    }
+}
+
 pub struct Pes {
     pub header: PesHeader,
     pub optional_header: Option<PesOptionalHeader>,
-    pub pts: u64,
-    pub dts: u64,
-    pub data: Vec<u8>,
+    pub pts: Option<u64>,
+    pub dts: Option<u64>,
+    pub data: Box<dyn PesUnitObject>,
 }
 
 impl Pes {
     pub fn new(
-        capacity: usize,
         header: PesHeader,
         optional_header: Option<PesOptionalHeader>,
-        pts: u64,
-        dts: u64,
+        pts: Option<u64>,
+        dts: Option<u64>,
+        data: Box<dyn PesUnitObject>,
     ) -> Self {
         Self {
             header,
             optional_header,
             pts,
             dts,
-            data: Vec::with_capacity(capacity),
+            data,
         }
     }
 }
 
-impl SpanObject for Pes {
+impl PayloadUnitObject for Pes {
     fn extend_from_slice(&mut self, slice: &[u8]) {
         self.data.extend_from_slice(slice);
     }
 
-    fn finish<'a>(self, pid: u16, parser: &mut MpegTsParser) -> Result<Payload<'a>> {
+    fn finish<'a>(mut self, pid: u16, parser: &mut MpegTsParser) -> Result<Payload<'a>> {
+        self.data.finish(pid, parser)?;
         Ok(Payload::Pes(self))
     }
 
@@ -74,15 +112,23 @@ impl SpanObject for Pes {
     }
 }
 
+fn fmt_pts_field(s: &mut DebugStruct, name: &str, ts: &Option<u64>) {
+    if let Some(ts) = ts {
+        s.field(name, &Some(pts_format_args!(ts)));
+    } else {
+        s.field(name, &Option::<Arguments>::None);
+    }
+}
+
 impl Debug for Pes {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("PES")
-            .field("header", &self.header)
-            .field("optional_header", &self.optional_header)
-            .field("pts", &pts_format_args!(self.pts))
-            .field("dts", &pts_format_args!(self.dts))
-            .field("data.len()", &self.data.len())
-            .finish()
+        let mut s = f.debug_struct("Pes");
+        s.field("header", &self.header);
+        s.field("optional_header", &self.optional_header);
+        fmt_pts_field(&mut s, "pts", &self.pts);
+        fmt_pts_field(&mut s, "dts", &self.dts);
+        s.field("data", &self.data);
+        s.finish()
     }
 }
 
@@ -92,13 +138,13 @@ impl MpegTsParser {
         pid: u16,
         reader: &mut SliceReader<'a>,
     ) -> Result<Payload<'a>> {
-        let pes_header = PesHeader::from_bytes(*reader.read_array_ref::<6>()?);
+        let pes_header = read_bitfield!(reader, PesHeader);
         let pes_length = pes_header.packet_length() as usize;
         let mut optional_length = 0;
-        let mut pts = 0;
-        let mut dts = 0;
+        let mut pts = None;
+        let mut dts = None;
         let pes_optional = if pes_length >= 3 && pes_header.stream_id() != 0xBF {
-            let pes_optional = PesOptionalHeader::from_bytes(*reader.read_array_ref::<3>()?);
+            let pes_optional = read_bitfield!(reader, PesOptionalHeader);
             let additional_length = pes_optional.additional_header_length() as usize;
             optional_length = 3 + additional_length;
             let mut o_reader = reader.new_sub_reader(additional_length)?;
@@ -108,7 +154,7 @@ impl MpegTsParser {
                     warn!("Short read of PTS");
                     return Err(o_reader.make_error(ErrorDetails::BadPesHeader));
                 }
-                pts = parse_timestamp(o_reader.read_array_ref::<5>()?);
+                pts = Some(parse_timestamp(o_reader.read_array_ref::<5>()?));
             }
 
             if pes_optional.has_dts() {
@@ -116,7 +162,7 @@ impl MpegTsParser {
                     warn!("Short read of DTS");
                     return Err(o_reader.make_error(ErrorDetails::BadPesHeader));
                 }
-                dts = parse_timestamp(o_reader.read_array_ref::<5>()?);
+                dts = Some(parse_timestamp(o_reader.read_array_ref::<5>()?));
             }
 
             // TODO: Other fields
@@ -125,10 +171,17 @@ impl MpegTsParser {
             None
         };
 
-        let span_length = pes_length - optional_length;
-        self.start_span(
-            Pes::new(span_length, pes_header, pes_optional, pts, dts),
-            span_length,
+        let unit_length = pes_length - optional_length;
+
+        let unit_data = if let Some(factory) = self.pes_unit_factories.get(&pid) {
+            factory.construct(pid, unit_length)
+        } else {
+            Box::new(RawPesData::new(unit_length))
+        };
+
+        self.start_payload_unit(
+            Pes::new(pes_header, pes_optional, pts, dts, unit_data),
+            unit_length,
             pid,
             reader,
         )

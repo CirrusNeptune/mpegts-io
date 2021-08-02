@@ -27,6 +27,7 @@ fn main() {
         match parsed_packet.packet.adaptation_field {
             Some(_) => {
                 println!("{:x?}", parsed_packet);
+                continue;
             }
             None => {}
         }
@@ -35,6 +36,7 @@ fn main() {
                 Payload::PesPending => {}
                 _ => {
                     println!("{:x?}", parsed_packet);
+                    continue;
                 }
             },
             None => {}
