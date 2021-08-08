@@ -272,221 +272,124 @@ impl MObjCmd {
     }
 }
 
-impl Display for MObjCmd {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        // TODO: Clean up this mess
-        if let MObjGroup::Set = self.inst.grp() {
-            let sub_grp: SetSubGroup = FromPrimitive::from_u8(self.inst.sub_grp()).unwrap();
-            if sub_grp == SetSubGroup::SetSystem {
-                let inst: SetSystemInstruction =
-                    FromPrimitive::from_u8(self.inst.set_opt()).unwrap();
-                match inst {
-                    // TODO: Operands of SetStreamSs not known
-                    SetSystemInstruction::SetStream | SetSystemInstruction::SetStreamSs => {
-                        let primary_audio_flag = (self.dst >> 28) & 0x8 != 0;
-                        let primary_audio_id =
-                            Self::make_operand((self.dst & 0x0fff0000) >> 16, self.inst.imm_op1());
-                        let pg_text_st_flag = ((self.dst & 0xf000) >> 12) & 0x8 != 0;
-                        let pg_text_st_enabled = ((self.dst & 0xf000) >> 12) & 0x4 != 0;
-                        let pg_text_st_id =
-                            Self::make_operand(self.dst & 0xfff, self.inst.imm_op1());
+macro_rules! format_cmd {
+    ($fmt_type:ident) => {
+        impl $fmt_type for MObjCmd {
+            fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+                if let MObjGroup::Set = self.inst.grp() {
+                    let sub_grp: SetSubGroup = FromPrimitive::from_u8(self.inst.sub_grp()).unwrap();
+                    if sub_grp == SetSubGroup::SetSystem {
+                        let inst: SetSystemInstruction =
+                            FromPrimitive::from_u8(self.inst.set_opt()).unwrap();
+                        match inst {
+                            // TODO: Operands of SetStreamSs not known
+                            SetSystemInstruction::SetStream | SetSystemInstruction::SetStreamSs => {
+                                let primary_audio_flag = (self.dst >> 28) & 0x8 != 0;
+                                let primary_audio_id = Self::make_operand(
+                                    (self.dst & 0x0fff0000) >> 16,
+                                    self.inst.imm_op1(),
+                                );
+                                let pg_text_st_flag = ((self.dst & 0xf000) >> 12) & 0x8 != 0;
+                                let pg_text_st_enabled = ((self.dst & 0xf000) >> 12) & 0x4 != 0;
+                                let pg_text_st_id =
+                                    Self::make_operand(self.dst & 0xfff, self.inst.imm_op1());
 
-                        let ig_flag = (self.src >> 28) & 0x8 != 0;
-                        let ig_id =
-                            Self::make_operand((self.src & 0x0fff0000) >> 16, self.inst.imm_op2());
-                        let angle_flag = ((self.src & 0xf000) >> 12) & 0x8 != 0;
-                        let angle_id = Self::make_operand(self.src & 0xfff, self.inst.imm_op2());
+                                let ig_flag = (self.src >> 28) & 0x8 != 0;
+                                let ig_id = Self::make_operand(
+                                    (self.src & 0x0fff0000) >> 16,
+                                    self.inst.imm_op2(),
+                                );
+                                let angle_flag = ((self.src & 0xf000) >> 12) & 0x8 != 0;
+                                let angle_id =
+                                    Self::make_operand(self.src & 0xfff, self.inst.imm_op2());
 
+                                f.write_str(self.mnemonic())?;
+                                f.write_str(" ")?;
+                                if primary_audio_flag {
+                                    $fmt_type::fmt(&primary_audio_id, f)?;
+                                } else {
+                                    f.write_str("none")?;
+                                }
+                                f.write_str(", ")?;
+                                if pg_text_st_flag {
+                                    $fmt_type::fmt(&pg_text_st_id, f)?;
+                                } else {
+                                    f.write_str("none")?;
+                                }
+                                f.write_str(", ")?;
+                                if pg_text_st_enabled {
+                                    f.write_str("text_st_enabled")?;
+                                } else {
+                                    f.write_str("text_st_disabled")?;
+                                }
+                                f.write_str(", ")?;
+                                if ig_flag {
+                                    $fmt_type::fmt(&ig_id, f)?;
+                                } else {
+                                    f.write_str("none")?;
+                                }
+                                f.write_str(", ")?;
+                                if angle_flag {
+                                    $fmt_type::fmt(&angle_id, f)?;
+                                } else {
+                                    f.write_str("none")?;
+                                }
+                                return Ok(());
+                            }
+                            SetSystemInstruction::SetButtonPage => {
+                                let button_flag = self.dst & 0x80000000 != 0;
+                                let button_id =
+                                    Self::make_operand(self.dst & 0x3fffffff, self.inst.imm_op1());
+                                let page_flag = self.src & 0x80000000 != 0;
+                                let effect_flag = self.src & 0x40000000 != 0;
+                                let page_id =
+                                    Self::make_operand(self.src & 0x3fffffff, self.inst.imm_op2());
+
+                                f.write_str(self.mnemonic())?;
+                                f.write_str(" ")?;
+                                if button_flag {
+                                    $fmt_type::fmt(&button_id, f)?;
+                                } else {
+                                    f.write_str("none")?;
+                                }
+                                f.write_str(", ")?;
+                                if page_flag {
+                                    $fmt_type::fmt(&page_id, f)?;
+                                } else {
+                                    f.write_str("none")?;
+                                }
+                                if effect_flag {
+                                    f.write_str(", skip_out")?;
+                                }
+                                return Ok(());
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+
+                match self.inst.op_cnt() {
+                    0 => f.write_str(self.mnemonic()),
+                    1 => {
                         f.write_str(self.mnemonic())?;
                         f.write_str(" ")?;
-                        if primary_audio_flag {
-                            std::fmt::Display::fmt(&primary_audio_id, f)?;
-                        } else {
-                            f.write_str("none")?;
-                        }
-                        f.write_str(", ")?;
-                        if pg_text_st_flag {
-                            std::fmt::Display::fmt(&pg_text_st_id, f)?;
-                        } else {
-                            f.write_str("none")?;
-                        }
-                        f.write_str(", ")?;
-                        if pg_text_st_enabled {
-                            f.write_str("text_st_enabled")?;
-                        } else {
-                            f.write_str("text_st_disabled")?;
-                        }
-                        f.write_str(", ")?;
-                        if ig_flag {
-                            std::fmt::Display::fmt(&ig_id, f)?;
-                        } else {
-                            f.write_str("none")?;
-                        }
-                        f.write_str(", ")?;
-                        if angle_flag {
-                            std::fmt::Display::fmt(&angle_id, f)?;
-                        } else {
-                            f.write_str("none")?;
-                        }
-                        return Ok(());
+                        $fmt_type::fmt(&self.dst_operand(), f)
                     }
-                    SetSystemInstruction::SetButtonPage => {
-                        let button_flag = self.dst & 0x80000000 != 0;
-                        let button_id =
-                            Self::make_operand(self.dst & 0x3fffffff, self.inst.imm_op1());
-                        let page_flag = self.src & 0x80000000 != 0;
-                        let effect_flag = self.src & 0x40000000 != 0;
-                        let page_id =
-                            Self::make_operand(self.src & 0x3fffffff, self.inst.imm_op2());
-
+                    _ => {
                         f.write_str(self.mnemonic())?;
                         f.write_str(" ")?;
-                        if button_flag {
-                            std::fmt::Display::fmt(&button_id, f)?;
-                        } else {
-                            f.write_str("none")?;
-                        }
+                        $fmt_type::fmt(&self.dst_operand(), f)?;
                         f.write_str(", ")?;
-                        if page_flag {
-                            std::fmt::Display::fmt(&page_id, f)?;
-                        } else {
-                            f.write_str("none")?;
-                        }
-                        if effect_flag {
-                            f.write_str(", skip_out")?;
-                        }
-                        return Ok(());
+                        $fmt_type::fmt(&self.src_operand(), f)
                     }
-                    _ => {}
                 }
             }
         }
-
-        match self.inst.op_cnt() {
-            0 => f.write_str(self.mnemonic()),
-            1 => {
-                f.write_str(self.mnemonic())?;
-                f.write_str(" ")?;
-                std::fmt::Display::fmt(&self.dst_operand(), f)
-            }
-            _ => {
-                f.write_str(self.mnemonic())?;
-                f.write_str(" ")?;
-                std::fmt::Display::fmt(&self.dst_operand(), f)?;
-                f.write_str(", ")?;
-                std::fmt::Display::fmt(&self.src_operand(), f)
-            }
-        }
-    }
+    };
 }
 
-impl Debug for MObjCmd {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        // TODO: Clean up this mess
-        if let MObjGroup::Set = self.inst.grp() {
-            let sub_grp: SetSubGroup = FromPrimitive::from_u8(self.inst.sub_grp()).unwrap();
-            if sub_grp == SetSubGroup::SetSystem {
-                let inst: SetSystemInstruction =
-                    FromPrimitive::from_u8(self.inst.set_opt()).unwrap();
-                match inst {
-                    // TODO: Operands of SetStreamSs not known
-                    SetSystemInstruction::SetStream | SetSystemInstruction::SetStreamSs => {
-                        let primary_audio_flag = (self.dst >> 28) & 0x8 != 0;
-                        let primary_audio_id =
-                            Self::make_operand((self.dst & 0x0fff0000) >> 16, self.inst.imm_op1());
-                        let pg_text_st_flag = ((self.dst & 0xf000) >> 12) & 0x8 != 0;
-                        let pg_text_st_enabled = ((self.dst & 0xf000) >> 12) & 0x4 != 0;
-                        let pg_text_st_id =
-                            Self::make_operand(self.dst & 0xfff, self.inst.imm_op1());
-
-                        let ig_flag = (self.src >> 28) & 0x8 != 0;
-                        let ig_id =
-                            Self::make_operand((self.src & 0x0fff0000) >> 16, self.inst.imm_op2());
-                        let angle_flag = ((self.src & 0xf000) >> 12) & 0x8 != 0;
-                        let angle_id = Self::make_operand(self.src & 0xfff, self.inst.imm_op2());
-
-                        f.write_str(self.mnemonic())?;
-                        f.write_str(" ")?;
-                        if primary_audio_flag {
-                            std::fmt::Debug::fmt(&primary_audio_id, f)?;
-                        } else {
-                            f.write_str("none")?;
-                        }
-                        f.write_str(", ")?;
-                        if pg_text_st_flag {
-                            std::fmt::Debug::fmt(&pg_text_st_id, f)?;
-                        } else {
-                            f.write_str("none")?;
-                        }
-                        f.write_str(", ")?;
-                        if pg_text_st_enabled {
-                            f.write_str("text_st_enabled")?;
-                        } else {
-                            f.write_str("text_st_disabled")?;
-                        }
-                        f.write_str(", ")?;
-                        if ig_flag {
-                            std::fmt::Debug::fmt(&ig_id, f)?;
-                        } else {
-                            f.write_str("none")?;
-                        }
-                        f.write_str(", ")?;
-                        if angle_flag {
-                            std::fmt::Debug::fmt(&angle_id, f)?;
-                        } else {
-                            f.write_str("none")?;
-                        }
-                        return Ok(());
-                    }
-                    SetSystemInstruction::SetButtonPage => {
-                        let button_flag = self.dst & 0x80000000 != 0;
-                        let button_id =
-                            Self::make_operand(self.dst & 0x3fffffff, self.inst.imm_op1());
-                        let page_flag = self.src & 0x80000000 != 0;
-                        let effect_flag = self.src & 0x40000000 != 0;
-                        let page_id =
-                            Self::make_operand(self.src & 0x3fffffff, self.inst.imm_op2());
-
-                        f.write_str(self.mnemonic())?;
-                        f.write_str(" ")?;
-                        if button_flag {
-                            std::fmt::Debug::fmt(&button_id, f)?;
-                        } else {
-                            f.write_str("none")?;
-                        }
-                        f.write_str(", ")?;
-                        if page_flag {
-                            std::fmt::Debug::fmt(&page_id, f)?;
-                        } else {
-                            f.write_str("none")?;
-                        }
-                        if effect_flag {
-                            f.write_str(", skip_out")?;
-                        }
-                        return Ok(());
-                    }
-                    _ => {}
-                }
-            }
-        }
-
-        match self.inst.op_cnt() {
-            0 => f.write_str(self.mnemonic()),
-            1 => {
-                f.write_str(self.mnemonic())?;
-                f.write_str(" ")?;
-                std::fmt::Debug::fmt(&self.dst_operand(), f)
-            }
-            _ => {
-                f.write_str(self.mnemonic())?;
-                f.write_str(" ")?;
-                std::fmt::Debug::fmt(&self.dst_operand(), f)?;
-                f.write_str(", ")?;
-                std::fmt::Debug::fmt(&self.src_operand(), f)
-            }
-        }
-    }
-}
+format_cmd!(Display);
+format_cmd!(Debug);
 
 trait MObjCmdVisitor<R> {
     fn visit_goto(self, inst: GotoInstruction) -> R;
@@ -617,13 +520,13 @@ impl Display for MObjOperand {
         match self {
             MObjOperand::Gpr(v) => {
                 f.write_str("r")?;
-                std::fmt::Display::fmt(&v, f)
+                Display::fmt(&v, f)
             }
             MObjOperand::Psr(v) => {
                 f.write_str("PSR")?;
-                std::fmt::Display::fmt(&v, f)
+                Display::fmt(&v, f)
             }
-            MObjOperand::Imm(v) => std::fmt::Display::fmt(&v, f),
+            MObjOperand::Imm(v) => Display::fmt(&v, f),
         }
     }
 }
@@ -633,11 +536,11 @@ impl Debug for MObjOperand {
         match self {
             MObjOperand::Gpr(v) => {
                 f.write_str("r")?;
-                std::fmt::Debug::fmt(&v, f)
+                Debug::fmt(&v, f)
             }
             MObjOperand::Psr(v) => {
                 f.write_str("PSR")?;
-                std::fmt::Debug::fmt(&v, f)?;
+                Debug::fmt(&v, f)?;
                 let comment = self.psr_comment();
                 if !comment.is_empty() {
                     f.write_str(" ")?;
@@ -645,7 +548,7 @@ impl Debug for MObjOperand {
                 }
                 Ok(())
             }
-            MObjOperand::Imm(v) => std::fmt::Debug::fmt(&v, f),
+            MObjOperand::Imm(v) => Debug::fmt(&v, f),
         }
     }
 }
