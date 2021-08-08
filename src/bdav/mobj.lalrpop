@@ -1,0 +1,280 @@
+use std::str::FromStr;
+use lalrpop_util::ParseError;
+use super::{
+    MObjParseErrorDetails, MObjCmd, MObjGroup, MObjOperand, MObjInstruction, BranchSubGroup, SetSubGroup,
+    GotoInstruction, JumpInstruction, PlayInstruction, CmpInstruction, SetInstruction, SetSystemInstruction
+};
+
+grammar;
+
+match {
+    ",",
+    "r",
+    "PSR",
+    r"0[xX][0-9a-fA-F]+" => HEXNUM,
+    r"[0-9]+" => NUM,
+
+    r"(?i)nop" => NOP,
+    r"(?i)break" => BREAK,
+    r"(?i)resume" => RESUME,
+    r"(?i)terminate_pl" => TERMINATE_PL,
+    r"(?i)goto" => GOTO,
+    r"(?i)jump_title" => JUMP_TITLE,
+    r"(?i)call_title" => CALL_TITLE,
+    r"(?i)jump_object" => JUMP_OBJECT,
+    r"(?i)call_object" => CALL_OBJECT,
+    r"(?i)play_pl" => PLAY_PL,
+    r"(?i)link_pi" => LINK_PI,
+    r"(?i)link_mk" => LINK_MK,
+    r"(?i)play_pl_pi" => PLAY_PL_PI,
+    r"(?i)play_pl_pm" => PLAY_PL_PM,
+    r"(?i)bc" => BC,
+    r"(?i)eq" => EQ,
+    r"(?i)ne" => NE,
+    r"(?i)ge" => GE,
+    r"(?i)gt" => GT,
+    r"(?i)le" => LE,
+    r"(?i)lt" => LT,
+    r"(?i)move" => MOVE,
+    r"(?i)swap" => SWAP,
+    r"(?i)add" => ADD,
+    r"(?i)sub" => SUB,
+    r"(?i)mul" => MUL,
+    r"(?i)div" => DIV,
+    r"(?i)mod" => MOD,
+    r"(?i)rnd" => RND,
+    r"(?i)and" => AND,
+    r"(?i)or" => OR,
+    r"(?i)xor" => XOR,
+    r"(?i)bset" => BSET,
+    r"(?i)bclr" => BCLR,
+    r"(?i)shl" => SHL,
+    r"(?i)shr" => SHR,
+    r"(?i)set_stream" => SET_STREAM,
+    r"(?i)set_nv_timer" => SET_NV_TIMER,
+    r"(?i)set_button_page" => SET_BUTTON_PAGE,
+    r"(?i)enable_button" => ENABLE_BUTTON,
+    r"(?i)disable_button" => DISABLE_BUTTON,
+    r"(?i)set_sec_stream" => SET_SEC_STREAM,
+    r"(?i)popup_off" => POPUP_OFF,
+    r"(?i)still_on" => STILL_ON,
+    r"(?i)still_off" => STILL_OFF,
+    r"(?i)set_output_mode" => SET_OUTPUT_MODE,
+    r"(?i)set_stream_ss" => SET_STREAM_SS,
+    r"(?i)bd_plus_msg" => BD_PLUS_MSG,
+
+    r"\s*" => { },
+    r"//[^\n\r]*[\n\r]*" => { },
+    r"/\*([^\*]*\*+[^\*/])*([^\*]*\*+|[^\*])*\*/" => { },
+}
+
+extern {
+    type Error = MObjParseErrorDetails;
+}
+
+pub(crate) Cmd: MObjCmd = {
+    <m:ZeroOpBranchMnemonic> => MObjCmd {
+        inst: MObjInstruction::new()
+            .with_op_cnt(0)
+            .with_grp(MObjGroup::Branch)
+            .with_sub_grp(m.0)
+            .with_branch_opt(m.1),
+        dst: 0,
+        src: 0,
+    },
+    <m:OneOpBranchMnemonic> <dst:Operand> => MObjCmd {
+        inst: MObjInstruction::new()
+            .with_op_cnt(1)
+            .with_grp(MObjGroup::Branch)
+            .with_sub_grp(m.0)
+            .with_imm_op1(dst.is_imm())
+            .with_branch_opt(m.1),
+        dst: dst.into_val(),
+        src: 0,
+    },
+    <m:TwoOpBranchMnemonic> <dst:Operand> "," <src:Operand> => MObjCmd {
+        inst: MObjInstruction::new()
+            .with_op_cnt(2)
+            .with_grp(MObjGroup::Branch)
+            .with_sub_grp(m.0)
+            .with_imm_op1(dst.is_imm())
+            .with_imm_op2(src.is_imm())
+            .with_branch_opt(m.1),
+        dst: dst.into_val(),
+        src: src.into_val(),
+    },
+    <m:TwoOpCmpMnemonic> <dst:Operand> "," <src:Operand> => MObjCmd {
+        inst: MObjInstruction::new()
+            .with_op_cnt(2)
+            .with_grp(MObjGroup::Cmp)
+            .with_imm_op1(dst.is_imm())
+            .with_imm_op2(src.is_imm())
+            .with_cmp_opt(m),
+        dst: dst.into_val(),
+        src: src.into_val(),
+    },
+    <m:ZeroOpSetMnemonic> => MObjCmd {
+        inst: MObjInstruction::new()
+            .with_op_cnt(0)
+            .with_grp(MObjGroup::Set)
+            .with_sub_grp(m.0)
+            .with_set_opt(m.1),
+        dst: 0,
+        src: 0,
+    },
+    <m:OneOpSetMnemonic> <dst:Operand> => MObjCmd {
+        inst: MObjInstruction::new()
+            .with_op_cnt(1)
+            .with_grp(MObjGroup::Set)
+            .with_sub_grp(m.0)
+            .with_imm_op1(dst.is_imm())
+            .with_set_opt(m.1),
+        dst: dst.into_val(),
+        src: 0,
+    },
+    <m:TwoOpSetMnemonic> <dst:Operand> "," <src:Operand> => MObjCmd {
+        inst: MObjInstruction::new()
+            .with_op_cnt(2)
+            .with_grp(MObjGroup::Set)
+            .with_sub_grp(m.0)
+            .with_imm_op1(dst.is_imm())
+            .with_imm_op2(src.is_imm())
+            .with_set_opt(m.1),
+        dst: dst.into_val(),
+        src: src.into_val(),
+    },
+}
+
+ZeroOpBranchMnemonic: (u8, u8) = {
+    NOP => (BranchSubGroup::Goto as u8, GotoInstruction::Nop as u8),
+    BREAK => (BranchSubGroup::Goto as u8, GotoInstruction::Break as u8),
+    RESUME => (BranchSubGroup::Jump as u8, JumpInstruction::Resume as u8),
+    TERMINATE_PL => (BranchSubGroup::Play as u8, PlayInstruction::TerminatePlaylist as u8),
+}
+
+OneOpBranchMnemonic: (u8, u8) = {
+    GOTO => (BranchSubGroup::Goto as u8, GotoInstruction::Goto as u8),
+    JUMP_TITLE => (BranchSubGroup::Jump as u8, JumpInstruction::JumpTitle as u8),
+    CALL_TITLE => (BranchSubGroup::Jump as u8, JumpInstruction::CallTitle as u8),
+    JUMP_OBJECT => (BranchSubGroup::Jump as u8, JumpInstruction::JumpObject as u8),
+    CALL_OBJECT => (BranchSubGroup::Jump as u8, JumpInstruction::CallObject as u8),
+    PLAY_PL => (BranchSubGroup::Play as u8, PlayInstruction::PlayPlaylist as u8),
+    LINK_PI => (BranchSubGroup::Play as u8, PlayInstruction::LinkItem as u8),
+    LINK_MK => (BranchSubGroup::Play as u8, PlayInstruction::LinkMark as u8),
+}
+
+TwoOpBranchMnemonic: (u8, u8) = {
+    PLAY_PL_PI => (BranchSubGroup::Play as u8, PlayInstruction::PlayPlaylistItem as u8),
+    PLAY_PL_PM => (BranchSubGroup::Play as u8, PlayInstruction::PlayPlaylistMark as u8),
+}
+
+TwoOpCmpMnemonic: u8 = {
+    BC => CmpInstruction::Bc as u8,
+    EQ => CmpInstruction::Eq as u8,
+    NE => CmpInstruction::Ne as u8,
+    GE => CmpInstruction::Ge as u8,
+    GT => CmpInstruction::Gt as u8,
+    LE => CmpInstruction::Le as u8,
+    LT => CmpInstruction::Lt as u8,
+}
+
+ZeroOpSetMnemonic: (u8, u8) = {
+    POPUP_OFF => (SetSubGroup::SetSystem as u8, SetSystemInstruction::PopupOff as u8),
+    STILL_ON => (SetSubGroup::SetSystem as u8, SetSystemInstruction::StillOn as u8),
+    STILL_OFF => (SetSubGroup::SetSystem as u8, SetSystemInstruction::StillOff as u8),
+}
+
+OneOpSetMnemonic: (u8, u8) = {
+    ENABLE_BUTTON => (SetSubGroup::SetSystem as u8, SetSystemInstruction::EnableButton as u8),
+    DISABLE_BUTTON => (SetSubGroup::SetSystem as u8, SetSystemInstruction::DisableButton as u8),
+    SET_OUTPUT_MODE => (SetSubGroup::SetSystem as u8, SetSystemInstruction::SetOutputMode as u8),
+}
+
+TwoOpSetMnemonic: (u8, u8) = {
+    MOVE => (SetSubGroup::Set as u8, SetInstruction::Move as u8),
+    SWAP => (SetSubGroup::Set as u8, SetInstruction::Swap as u8),
+    ADD => (SetSubGroup::Set as u8, SetInstruction::Add as u8),
+    SUB => (SetSubGroup::Set as u8, SetInstruction::Sub as u8),
+    MUL => (SetSubGroup::Set as u8, SetInstruction::Mul as u8),
+    DIV => (SetSubGroup::Set as u8, SetInstruction::Div as u8),
+    MOD => (SetSubGroup::Set as u8, SetInstruction::Mod as u8),
+    RND => (SetSubGroup::Set as u8, SetInstruction::Rnd as u8),
+    AND => (SetSubGroup::Set as u8, SetInstruction::And as u8),
+    OR => (SetSubGroup::Set as u8, SetInstruction::Or as u8),
+    XOR => (SetSubGroup::Set as u8, SetInstruction::Xor as u8),
+    BSET => (SetSubGroup::Set as u8, SetInstruction::Bitset as u8),
+    BCLR => (SetSubGroup::Set as u8, SetInstruction::Bitclr as u8),
+    SHL => (SetSubGroup::Set as u8, SetInstruction::Shl as u8),
+    SHR => (SetSubGroup::Set as u8, SetInstruction::Shr as u8),
+    SET_STREAM => (SetSubGroup::SetSystem as u8, SetSystemInstruction::SetStream as u8),
+    SET_NV_TIMER => (SetSubGroup::SetSystem as u8, SetSystemInstruction::SetNvTimer as u8),
+    SET_BUTTON_PAGE => (SetSubGroup::SetSystem as u8, SetSystemInstruction::SetButtonPage as u8),
+    SET_SEC_STREAM => (SetSubGroup::SetSystem as u8, SetSystemInstruction::SetSecStream as u8),
+    SET_STREAM_SS => (SetSubGroup::SetSystem as u8, SetSystemInstruction::SetStreamSs as u8),
+    BD_PLUS_MSG => (SetSubGroup::SetSystem as u8, SetSystemInstruction::BdPlusMsg as u8),
+}
+
+Operand: MObjOperand = {
+    "r" <n:GprNum> => MObjOperand::Gpr(n),
+    "PSR" <n:PsrNum> => MObjOperand::Psr(n),
+    <n:Num> => MObjOperand::Imm(n),
+}
+
+GprNum: u32 = {
+    <v:HEXNUM> =>? u32::from_str_radix(&v[2..], 16)
+        .ok()
+        .and_then(|n| {
+            if (0..=0xfff).contains(&n) {
+                Some(n)
+            } else {
+                None
+            }
+        })
+        .ok_or_else(|| ParseError::User {
+            error: MObjParseErrorDetails::GprOutOfRange,
+        }),
+    <v:NUM> =>? u32::from_str_radix(v, 10)
+        .ok()
+        .and_then(|n| {
+            if (0..=0xfff).contains(&n) {
+                Some(n)
+            } else {
+                None
+            }
+        })
+        .ok_or_else(|| ParseError::User {
+            error: MObjParseErrorDetails::GprOutOfRange,
+        }),
+}
+
+PsrNum: u32 = {
+    <v:HEXNUM> =>? u32::from_str_radix(&v[2..], 16)
+        .ok()
+        .and_then(|n| {
+            if (0..=0x7f).contains(&n) {
+                Some(n)
+            } else {
+                None
+            }
+        })
+        .ok_or_else(|| ParseError::User {
+            error: MObjParseErrorDetails::PsrOutOfRange,
+        }),
+    <v:NUM> =>? u32::from_str_radix(v, 10)
+        .ok()
+        .and_then(|n| {
+            if (0..=0x7f).contains(&n) {
+                Some(n)
+            } else {
+                None
+            }
+        })
+        .ok_or_else(|| ParseError::User {
+            error: MObjParseErrorDetails::PsrOutOfRange,
+        }),
+}
+
+Num: u32 = {
+    <v:HEXNUM> => u32::from_str_radix(&v[2..], 16).unwrap(),
+    <v:NUM> => u32::from_str_radix(v, 10).unwrap(),
+}

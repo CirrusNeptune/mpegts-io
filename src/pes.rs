@@ -1,6 +1,6 @@
 use super::{
-    parse_timestamp, pts_format_args, read_bitfield, ErrorDetails, MpegTsParser, Payload,
-    PayloadUnitObject, Result, SliceReader,
+    parse_timestamp, pts_format_args, read_bitfield, AppDetails, ErrorDetails, MpegTsParser,
+    Payload, PayloadUnitObject, Result, SliceReader,
 };
 use log::warn;
 use modular_bitfield_msb::prelude::*;
@@ -35,13 +35,13 @@ pub struct PesOptionalHeader {
     pub additional_header_length: B8,
 }
 
-pub trait PesUnitObject: Debug {
+pub trait PesUnitObject<D: AppDetails>: Debug {
     fn extend_from_slice(&mut self, slice: &[u8]);
-    fn finish(&mut self, pid: u16, parser: &mut MpegTsParser) -> Result<()>;
+    fn finish(&mut self, pid: u16, parser: &mut MpegTsParser<D>) -> Result<(), D>;
 }
 
-pub trait PesUnitObjectFactory {
-    fn construct(&self, pid: u16, capacity: usize) -> Box<dyn PesUnitObject>;
+pub trait PesUnitObjectFactory<D> {
+    fn construct(&self, pid: u16, capacity: usize) -> Box<dyn PesUnitObject<D>>;
 }
 
 #[derive(Default)]
@@ -61,31 +61,31 @@ impl Debug for RawPesData {
     }
 }
 
-impl PesUnitObject for RawPesData {
+impl<D: AppDetails> PesUnitObject<D> for RawPesData {
     fn extend_from_slice(&mut self, slice: &[u8]) {
         self.0.extend_from_slice(slice);
     }
 
-    fn finish(&mut self, pid: u16, parser: &mut MpegTsParser) -> Result<()> {
+    fn finish(&mut self, pid: u16, parser: &mut MpegTsParser<D>) -> Result<(), D> {
         Ok(())
     }
 }
 
-pub struct Pes {
+pub struct Pes<D> {
     pub header: PesHeader,
     pub optional_header: Option<PesOptionalHeader>,
     pub pts: Option<u64>,
     pub dts: Option<u64>,
-    pub data: Box<dyn PesUnitObject>,
+    pub data: Box<dyn PesUnitObject<D>>,
 }
 
-impl Pes {
+impl<D> Pes<D> {
     pub fn new(
         header: PesHeader,
         optional_header: Option<PesOptionalHeader>,
         pts: Option<u64>,
         dts: Option<u64>,
-        data: Box<dyn PesUnitObject>,
+        data: Box<dyn PesUnitObject<D>>,
     ) -> Self {
         Self {
             header,
@@ -97,17 +97,17 @@ impl Pes {
     }
 }
 
-impl PayloadUnitObject for Pes {
+impl<D: AppDetails> PayloadUnitObject<D> for Pes<D> {
     fn extend_from_slice(&mut self, slice: &[u8]) {
         self.data.extend_from_slice(slice);
     }
 
-    fn finish<'a>(mut self, pid: u16, parser: &mut MpegTsParser) -> Result<Payload<'a>> {
+    fn finish<'a>(mut self, pid: u16, parser: &mut MpegTsParser<D>) -> Result<Payload<'a, D>, D> {
         self.data.finish(pid, parser)?;
         Ok(Payload::Pes(self))
     }
 
-    fn pending<'a>(&self) -> Result<Payload<'a>> {
+    fn pending<'a>(&self) -> Result<Payload<'a, D>, D> {
         Ok(Payload::PesPending)
     }
 }
@@ -120,7 +120,7 @@ fn fmt_pts_field(s: &mut DebugStruct, name: &str, ts: &Option<u64>) {
     }
 }
 
-impl Debug for Pes {
+impl<D> Debug for Pes<D> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         let mut s = f.debug_struct("Pes");
         s.field("header", &self.header);
@@ -132,12 +132,12 @@ impl Debug for Pes {
     }
 }
 
-impl MpegTsParser {
+impl<D: AppDetails> MpegTsParser<D> {
     pub(crate) fn start_pes<'a>(
         &mut self,
         pid: u16,
-        reader: &mut SliceReader<'a>,
-    ) -> Result<Payload<'a>> {
+        reader: &mut SliceReader<'a, D>,
+    ) -> Result<Payload<'a, D>, D> {
         let pes_header = read_bitfield!(reader, PesHeader);
         let pes_length = pes_header.packet_length() as usize;
         let mut optional_length = 0;
@@ -152,7 +152,7 @@ impl MpegTsParser {
             if pes_optional.has_pts() {
                 if o_reader.remaining_len() < 5 {
                     warn!("Short read of PTS");
-                    return Err(o_reader.make_error(ErrorDetails::BadPesHeader));
+                    return Err(o_reader.make_error(ErrorDetails::<D>::BadPesHeader));
                 }
                 pts = Some(parse_timestamp(o_reader.read_array_ref::<5>()?));
             }
@@ -160,7 +160,7 @@ impl MpegTsParser {
             if pes_optional.has_dts() {
                 if o_reader.remaining_len() < 5 {
                     warn!("Short read of DTS");
-                    return Err(o_reader.make_error(ErrorDetails::BadPesHeader));
+                    return Err(o_reader.make_error(ErrorDetails::<D>::BadPesHeader));
                 }
                 dts = Some(parse_timestamp(o_reader.read_array_ref::<5>()?));
             }
@@ -173,8 +173,8 @@ impl MpegTsParser {
 
         let unit_length = pes_length - optional_length;
 
-        let unit_data = if let Some(factory) = self.pes_unit_factories.get(&pid) {
-            factory.construct(pid, unit_length)
+        let unit_data = if let Some(unit_data) = D::new_pes_unit_data(pid, unit_length) {
+            unit_data
         } else {
             Box::new(RawPesData::new(unit_length))
         };

@@ -35,35 +35,51 @@ mod pes;
 use pes::{Pes, PesUnitObject, PesUnitObjectFactory};
 
 mod bdav;
-pub use bdav::BdavParser;
+pub use bdav::{BdavParser, DefaultBdavAppDetails};
 
 const CRC: Crc<u32> = Crc::<u32>::new(&CRC_32_MPEG_2);
 type CrcDigest = Digest<'static, u32>;
 
 #[derive(Debug)]
-pub enum ErrorDetails {
+pub enum ErrorDetails<D: AppDetails> {
     PacketOverrun(usize),
     LostSync,
     BadAdaptationHeader,
     BadPsiHeader,
     BadPesHeader,
     PsiCrcMismatch,
-    PesError(String),
+    AppError(D::AppErrorDetails),
+}
+
+pub trait AppDetails: Default {
+    type AppErrorDetails: Debug;
+    fn new_pes_unit_data(pid: u16, unit_length: usize) -> Option<Box<dyn PesUnitObject<Self>>>;
+}
+
+#[derive(Default)]
+pub struct DefaultAppDetails;
+
+impl AppDetails for DefaultAppDetails {
+    type AppErrorDetails = ();
+
+    fn new_pes_unit_data(pid: u16, unit_length: usize) -> Option<Box<dyn PesUnitObject<Self>>> {
+        None
+    }
 }
 
 #[derive(Debug)]
-pub struct Error {
+pub struct Error<D: AppDetails> {
     location: usize,
-    details: ErrorDetails,
+    details: ErrorDetails<D>,
 }
 
-impl Error {
-    pub fn new(location: usize, details: ErrorDetails) -> Self {
+impl<D: AppDetails> Error<D> {
+    pub fn new(location: usize, details: ErrorDetails<D>) -> Self {
         Self { location, details }
     }
 }
 
-pub type Result<T> = result::Result<T, Error>;
+pub type Result<T, D> = result::Result<T, Error<D>>;
 
 #[repr(u8)]
 #[derive(Debug, BitfieldSpecifier)]
@@ -139,26 +155,25 @@ pub struct AdaptationField {
 }
 
 #[derive(Debug)]
-pub enum Payload<'a> {
+pub enum Payload<'a, D> {
     Unknown,
-    Raw(SliceReader<'a>),
+    Raw(SliceReader<'a, D>),
     PsiPending,
     Psi(Psi),
     PesPending,
-    Pes(Pes),
+    Pes(Pes<D>),
 }
 
 #[derive(Debug)]
-pub struct Packet<'a> {
+pub struct Packet<'a, D> {
     pub header: PacketHeader,
     pub adaptation_field: Option<AdaptationField>,
-    pub payload: Option<Payload<'a>>,
+    pub payload: Option<Payload<'a, D>>,
 }
 
 #[derive(Default)]
-pub struct MpegTsParser {
-    pes_unit_factories: HashMap<u16, Rc<dyn PesUnitObjectFactory>>,
-    pending_payload_units: HashMap<u16, PayloadUnitBuilder>,
+pub struct MpegTsParser<D: AppDetails = DefaultAppDetails> {
+    pending_payload_units: HashMap<u16, PayloadUnitBuilder<D>>,
     known_pmt_pids: HashSet<u16>,
 }
 
@@ -187,22 +202,8 @@ fn parse_pcr(b: &[u8; 6]) -> PcrTimestamp {
     PcrTimestamp { base, extension }
 }
 
-impl MpegTsParser {
-    pub fn register_pes_unit_factory(&mut self, pid: u16, factory: Rc<dyn PesUnitObjectFactory>) {
-        self.pes_unit_factories.insert(pid, factory);
-    }
-
-    pub fn register_pes_unit_factory_iter<I: Iterator<Item = u16>>(
-        &mut self,
-        pids: I,
-        factory: Rc<dyn PesUnitObjectFactory>,
-    ) {
-        for pid in pids {
-            self.register_pes_unit_factory(pid, factory.clone());
-        }
-    }
-
-    fn read_adaptation_field(&mut self, reader: &mut SliceReader) -> Result<AdaptationField> {
+impl<D: AppDetails> MpegTsParser<D> {
+    fn read_adaptation_field(&mut self, reader: &mut SliceReader<D>) -> Result<AdaptationField, D> {
         let mut out = AdaptationField {
             header: read_bitfield!(reader, AdaptationFieldHeader),
             pcr: None,
@@ -211,20 +212,20 @@ impl MpegTsParser {
         let adaptation_field_length = out.header.length() as usize;
         if !(1..=183).contains(&adaptation_field_length) {
             warn!("Bad adaptation field length");
-            return Err(reader.make_error(ErrorDetails::BadAdaptationHeader));
+            return Err(reader.make_error(ErrorDetails::<D>::BadAdaptationHeader));
         }
         let mut a_reader = reader.new_sub_reader(adaptation_field_length - 1)?;
         if out.header.has_pcr() {
             if a_reader.remaining_len() < 6 {
                 warn!("Short read of PCR");
-                return Err(reader.make_error(ErrorDetails::BadAdaptationHeader));
+                return Err(reader.make_error(ErrorDetails::<D>::BadAdaptationHeader));
             }
             out.pcr = Some(parse_pcr(a_reader.read_array_ref::<6>()?));
         }
         if out.header.has_opcr() {
             if a_reader.remaining_len() < 6 {
                 warn!("Short read of OPCR");
-                return Err(reader.make_error(ErrorDetails::BadAdaptationHeader));
+                return Err(reader.make_error(ErrorDetails::<D>::BadAdaptationHeader));
             }
             out.opcr = Some(parse_pcr(a_reader.read_array_ref::<6>()?));
         }
@@ -239,8 +240,8 @@ impl MpegTsParser {
         &mut self,
         pusi: bool,
         pid: u16,
-        mut reader: SliceReader<'a>,
-    ) -> Result<Payload<'a>> {
+        mut reader: SliceReader<'a, D>,
+    ) -> Result<Payload<'a, D>, D> {
         if pusi {
             /* Make sure we're not starting an already-started unit */
             if self.pending_payload_units.contains_key(&pid) {
@@ -266,7 +267,10 @@ impl MpegTsParser {
         }
     }
 
-    pub(crate) fn parse_internal<'a>(&mut self, mut reader: SliceReader<'a>) -> Result<Packet<'a>> {
+    pub(crate) fn parse_internal<'a>(
+        &mut self,
+        mut reader: SliceReader<'a, D>,
+    ) -> Result<Packet<'a, D>, D> {
         /* Start with header and verify sync */
         let mut out = Packet {
             header: read_bitfield!(reader, PacketHeader),
@@ -274,7 +278,7 @@ impl MpegTsParser {
             payload: None,
         };
         if out.header.sync_byte() != 0x47 {
-            return Err(Error::new(0, ErrorDetails::LostSync));
+            return Err(reader.make_error(ErrorDetails::<D>::LostSync));
         }
 
         /* Special cases exist for some PIDs */
@@ -298,7 +302,7 @@ impl MpegTsParser {
         Ok(out)
     }
 
-    pub fn parse<'a>(&mut self, packet: &'a [u8; 188]) -> Result<Packet<'a>> {
+    pub fn parse<'a>(&mut self, packet: &'a [u8; 188]) -> Result<Packet<'a, D>, D> {
         let reader = SliceReader::new(packet);
         self.parse_internal(reader)
     }

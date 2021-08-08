@@ -1,29 +1,29 @@
-use super::{MpegTsParser, Payload, Pes, PsiBuilder, Result, SliceReader};
+use super::{AppDetails, MpegTsParser, Payload, Pes, PsiBuilder, Result, SliceReader};
 use enum_dispatch::enum_dispatch;
 use log::warn;
 
 #[enum_dispatch]
-pub(crate) trait PayloadUnitObject {
+pub(crate) trait PayloadUnitObject<D: AppDetails> {
     fn extend_from_slice(&mut self, slice: &[u8]);
-    fn finish<'a>(self, pid: u16, parser: &mut MpegTsParser) -> Result<Payload<'a>>;
-    fn pending<'a>(&self) -> Result<Payload<'a>>;
+    fn finish<'a>(self, pid: u16, parser: &mut MpegTsParser<D>) -> Result<Payload<'a, D>, D>;
+    fn pending<'a>(&self) -> Result<Payload<'a, D>, D>;
 }
 
-#[enum_dispatch(PayloadUnitObject)]
-pub(crate) enum PayloadUnit {
-    Psi(PsiBuilder),
-    Pes(Pes),
+#[enum_dispatch(PayloadUnitObject<D>)]
+pub(crate) enum PayloadUnit<D: AppDetails> {
+    Psi(PsiBuilder<D>),
+    Pes(Pes<D>),
 }
 
-pub(crate) struct PayloadUnitBuilder {
-    unit: PayloadUnit,
+pub(crate) struct PayloadUnitBuilder<D: AppDetails> {
+    unit: PayloadUnit<D>,
     remaining: usize,
 }
 
-impl PayloadUnitBuilder {
-    pub fn new<T: PayloadUnitObject>(obj: T, obj_length: usize) -> Self
+impl<D: AppDetails> PayloadUnitBuilder<D> {
+    pub fn new<T: PayloadUnitObject<D>>(obj: T, obj_length: usize) -> Self
     where
-        PayloadUnit: From<T>,
+        PayloadUnit<D>: From<T>,
     {
         Self {
             unit: obj.into(),
@@ -31,7 +31,7 @@ impl PayloadUnitBuilder {
         }
     }
 
-    pub fn append(&mut self, reader: &mut SliceReader) -> Result<bool> {
+    pub fn append(&mut self, reader: &mut SliceReader<D>) -> Result<bool, D> {
         if reader.remaining_len() <= self.remaining {
             self.remaining -= reader.remaining_len();
             self.unit.extend_from_slice(reader.read_to_end()?);
@@ -43,26 +43,26 @@ impl PayloadUnitBuilder {
         }
     }
 
-    pub fn finish<'a>(self, pid: u16, parser: &mut MpegTsParser) -> Result<Payload<'a>> {
+    pub fn finish<'a>(self, pid: u16, parser: &mut MpegTsParser<D>) -> Result<Payload<'a, D>, D> {
         assert_eq!(self.remaining, 0);
         self.unit.finish(pid, parser)
     }
 
-    pub fn pending<'a>(&self) -> Result<Payload<'a>> {
+    pub fn pending<'a>(&self) -> Result<Payload<'a, D>, D> {
         self.unit.pending()
     }
 }
 
-impl MpegTsParser {
-    pub(crate) fn start_payload_unit<'a, T: PayloadUnitObject>(
+impl<D: AppDetails> MpegTsParser<D> {
+    pub(crate) fn start_payload_unit<'a, T: PayloadUnitObject<D>>(
         &mut self,
         obj: T,
         length: usize,
         pid: u16,
-        reader: &mut SliceReader<'a>,
-    ) -> Result<Payload<'a>>
+        reader: &mut SliceReader<'a, D>,
+    ) -> Result<Payload<'a, D>, D>
     where
-        PayloadUnit: From<T>,
+        PayloadUnit<D>: From<T>,
     {
         let mut builder = PayloadUnitBuilder::new(obj, length);
         if builder.append(reader)? {
@@ -77,8 +77,8 @@ impl MpegTsParser {
     pub(crate) fn continue_payload_unit<'a>(
         &mut self,
         pid: u16,
-        reader: &mut SliceReader<'a>,
-    ) -> Result<Payload<'a>> {
+        reader: &mut SliceReader<'a, D>,
+    ) -> Result<Payload<'a, D>, D> {
         match self.pending_payload_units.get_mut(&pid) {
             Some(pes_state) => {
                 if pes_state.append(reader)? {

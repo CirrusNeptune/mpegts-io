@@ -1,10 +1,11 @@
 use super::{
-    read_bitfield, CrcDigest, Error, ErrorDetails, MpegTsParser, Payload, PayloadUnitObject,
-    Result, SliceReader, CRC,
+    read_bitfield, AppDetails, CrcDigest, Error, ErrorDetails, MpegTsParser, Payload,
+    PayloadUnitObject, Result, SliceReader, CRC,
 };
 use log::warn;
 use modular_bitfield_msb::prelude::*;
 use smallvec::SmallVec;
+use std::marker::PhantomData;
 
 #[bitfield]
 #[derive(Debug)]
@@ -44,7 +45,7 @@ pub struct Descriptor {
 }
 
 impl Descriptor {
-    pub fn new_from_reader(reader: &mut SliceReader) -> Result<Self> {
+    pub fn new_from_reader<D: AppDetails>(reader: &mut SliceReader<D>) -> Result<Self, D> {
         let tag = reader.read_u8()?;
         let len = reader.read_u8()?;
         let mut data = SmallVec::<[u8; 8]>::new();
@@ -103,14 +104,15 @@ pub struct Psi {
     pub data: PsiData,
 }
 
-pub struct PsiBuilder {
+pub struct PsiBuilder<D> {
+    phantom: PhantomData<D>,
     header: PsiHeader,
     table_syntax: Option<PsiTableSyntax>,
     data: Vec<u8>,
     hasher: Option<CrcDigest>,
 }
 
-impl PsiBuilder {
+impl<D: AppDetails> PsiBuilder<D> {
     pub fn new(
         capacity: usize,
         header: PsiHeader,
@@ -118,6 +120,7 @@ impl PsiBuilder {
         hasher: CrcDigest,
     ) -> Self {
         Self {
+            phantom: PhantomData,
             header,
             table_syntax,
             data: Vec::with_capacity(capacity),
@@ -125,7 +128,7 @@ impl PsiBuilder {
         }
     }
 
-    fn finish_substitute_data<'a>(mut self, data: PsiData) -> Result<Payload<'a>> {
+    fn finish_substitute_data<'a>(mut self, data: PsiData) -> Result<Payload<'a, D>, D> {
         Ok(Payload::Psi(Psi {
             header: self.header,
             table_syntax: self.table_syntax,
@@ -133,7 +136,7 @@ impl PsiBuilder {
         }))
     }
 
-    fn finish_keep_raw_data<'a>(mut self) -> Result<Payload<'a>> {
+    fn finish_keep_raw_data<'a>(mut self) -> Result<Payload<'a, D>, D> {
         Ok(Payload::Psi(Psi {
             header: self.header,
             table_syntax: self.table_syntax,
@@ -141,7 +144,7 @@ impl PsiBuilder {
         }))
     }
 
-    fn finish_pat<'a>(mut self, parser: &mut MpegTsParser) -> Result<Payload<'a>> {
+    fn finish_pat<'a>(mut self, parser: &mut MpegTsParser<D>) -> Result<Payload<'a, D>, D> {
         parser.known_pmt_pids.clear();
         let mut reader = SliceReader::new(self.data.as_slice());
         let mut pat_vec = Vec::with_capacity(reader.remaining_len() / 4);
@@ -153,7 +156,7 @@ impl PsiBuilder {
         self.finish_substitute_data(PsiData::Pat(pat_vec))
     }
 
-    fn finish_pmt<'a>(mut self, parser: &mut MpegTsParser) -> Result<Payload<'a>> {
+    fn finish_pmt<'a>(mut self, parser: &mut MpegTsParser<D>) -> Result<Payload<'a, D>, D> {
         let mut reader = SliceReader::new(self.data.as_slice());
         let header = read_bitfield!(reader, PmtHeader);
         let mut pmt = Pmt {
@@ -183,12 +186,12 @@ impl PsiBuilder {
     }
 }
 
-impl PayloadUnitObject for PsiBuilder {
+impl<D: AppDetails> PayloadUnitObject<D> for PsiBuilder<D> {
     fn extend_from_slice(&mut self, slice: &[u8]) {
         self.data.extend_from_slice(slice);
     }
 
-    fn finish<'a>(mut self, pid: u16, parser: &mut MpegTsParser) -> Result<Payload<'a>> {
+    fn finish<'a>(mut self, pid: u16, parser: &mut MpegTsParser<D>) -> Result<Payload<'a, D>, D> {
         /* Validate using CRC32 */
         let len_minus_crc = self.data.len() - 4;
         let mut hasher = self.hasher.take().expect("PSI hasher not set");
@@ -197,7 +200,7 @@ impl PayloadUnitObject for PsiBuilder {
         let expected_hash = SliceReader::new(&self.data[len_minus_crc..]).read_be_u32()?;
         if expected_hash != actual_hash {
             warn!("PSI hash mismatch for PID: {:x}", pid);
-            return Err(Error::new(0, ErrorDetails::PsiCrcMismatch));
+            return Err(Error::new(0, ErrorDetails::<D>::PsiCrcMismatch));
         }
         self.data.truncate(len_minus_crc);
 
@@ -217,31 +220,31 @@ impl PayloadUnitObject for PsiBuilder {
         }
     }
 
-    fn pending<'a>(&self) -> Result<Payload<'a>> {
+    fn pending<'a>(&self) -> Result<Payload<'a, D>, D> {
         Ok(Payload::PsiPending)
     }
 }
 
-impl MpegTsParser {
+impl<D: AppDetails> MpegTsParser<D> {
     pub(crate) fn start_psi<'a>(
         &mut self,
         pid: u16,
-        reader: &mut SliceReader<'a>,
-    ) -> Result<Payload<'a>> {
+        reader: &mut SliceReader<'a, D>,
+    ) -> Result<Payload<'a, D>, D> {
         if reader.remaining_len() < 1 {
             warn!("Short read of PSI pointer field");
-            return Err(reader.make_error(ErrorDetails::BadPsiHeader));
+            return Err(reader.make_error(ErrorDetails::<D>::BadPsiHeader));
         }
         let pointer_field = reader.read(1)?[0];
         if reader.remaining_len() < pointer_field as usize {
             warn!("Short read of PSI pointer filler");
-            return Err(reader.make_error(ErrorDetails::BadPsiHeader));
+            return Err(reader.make_error(ErrorDetails::<D>::BadPsiHeader));
         }
         reader.skip(pointer_field as usize)?;
 
         if reader.remaining_len() < 3 {
             warn!("Short read of PSI header");
-            return Err(reader.make_error(ErrorDetails::BadPsiHeader));
+            return Err(reader.make_error(ErrorDetails::<D>::BadPsiHeader));
         }
         let mut hasher = CRC.digest();
         let psi_header_bytes = reader.read_array_ref::<3>()?;
@@ -252,7 +255,7 @@ impl MpegTsParser {
         if section_length > 0 {
             if reader.remaining_len() < 5 {
                 warn!("Short read of PSI table syntax");
-                return Err(reader.make_error(ErrorDetails::BadPsiHeader));
+                return Err(reader.make_error(ErrorDetails::<D>::BadPsiHeader));
             }
             let psi_table_syntax_bytes = reader.read_array_ref::<5>()?;
             hasher.update(psi_table_syntax_bytes);
@@ -262,7 +265,7 @@ impl MpegTsParser {
             if table_length < 4 {
                 /* Must have length to read at least the CRC32 */
                 warn!("Insufficient table length");
-                return Err(reader.make_error(ErrorDetails::BadPsiHeader));
+                return Err(reader.make_error(ErrorDetails::<D>::BadPsiHeader));
             }
 
             self.start_payload_unit(
