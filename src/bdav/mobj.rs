@@ -1,6 +1,4 @@
 use super::{read_bitfield, AppDetails, Result, SliceReader};
-use crate::bdav::mobj::BranchSubGroup::Play;
-use crate::Error;
 use lalrpop_util::{lalrpop_mod, lexer::Token, ParseError};
 use modular_bitfield_msb::prelude::*;
 use num_derive::FromPrimitive;
