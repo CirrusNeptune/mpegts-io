@@ -1,8 +1,9 @@
 use std::str::FromStr;
 use lalrpop_util::ParseError;
 use super::{
-    MObjParseErrorDetails, MObjCmd, MObjGroup, MObjOperand, MObjInstruction, BranchSubGroup, SetSubGroup,
-    GotoInstruction, JumpInstruction, PlayInstruction, CmpInstruction, SetInstruction, SetSystemInstruction
+    MObjParseErrorDetails, MObjCmd, MObjGroup, MObjOperand, MObjInstruction, BranchSubGroup,
+    SetSubGroup, GotoInstruction, JumpInstruction, PlayInstruction, CmpInstruction, SetInstruction,
+    SetSystemInstruction,
 };
 
 grammar;

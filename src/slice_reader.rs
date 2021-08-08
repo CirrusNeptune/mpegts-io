@@ -1,5 +1,4 @@
-use super::{Error, ErrorDetails, Result};
-use crate::AppDetails;
+use super::{AppDetails, Error, ErrorDetails, Result};
 use std::marker::PhantomData;
 
 #[derive(Debug)]
