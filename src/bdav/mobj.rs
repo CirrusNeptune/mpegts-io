@@ -357,18 +357,21 @@ pub struct MObjCmd {
 }
 
 impl MObjCmd {
-    pub(crate) fn parse<D: AppDetails>(reader: &mut SliceReader<D>) -> Result<Self, D> {
+    /// Parses 12 bytes of command bytecode.
+    pub fn parse<D: AppDetails>(reader: &mut SliceReader<D>) -> Result<Self, D> {
         let inst = read_bitfield!(reader, MObjInstruction);
         let dst = reader.read_be_u32()?;
         let src = reader.read_be_u32()?;
         Ok(Self { inst, dst, src })
     }
 
-    pub(crate) fn assemble(s: &str) -> std::result::Result<Self, MObjParseError> {
+    /// Assembles a command from an assembly string.
+    pub fn assemble(s: &str) -> std::result::Result<Self, MObjParseError> {
         mobj::CmdParser::new().parse(s)
     }
 
-    fn visit<V: MObjCmdVisitor<R>, R>(&self, visitor: V) -> R {
+    /// Visit instruction with command category resolved.
+    pub fn visit<V: MObjCmdVisitor<R>, R>(&self, visitor: V) -> R {
         match self.inst.grp() {
             MObjGroup::Branch => match FromPrimitive::from_u8(self.inst.sub_grp()).unwrap() {
                 BranchSubGroup::Goto => {
@@ -395,7 +398,8 @@ impl MObjCmd {
         }
     }
 
-    fn mnemonic(&self) -> &'static str {
+    /// Gets string of command mnemonic.
+    pub fn mnemonic(&self) -> &'static str {
         self.visit(GetCmdMnemonic)
     }
 
@@ -537,12 +541,19 @@ macro_rules! format_cmd {
 format_cmd!(Display);
 format_cmd!(Debug);
 
-trait MObjCmdVisitor<R> {
+/// Visitor for each MObj command category. Use with [`MObjCmd::visit`].
+pub trait MObjCmdVisitor<R> {
+    /// Called when command contains a [`GotoInstruction`].
     fn visit_goto(self, inst: GotoInstruction) -> R;
+    /// Called when command contains a [`JumpInstruction`].
     fn visit_jump(self, inst: JumpInstruction) -> R;
+    /// Called when command contains a [`PlayInstruction`].
     fn visit_play(self, inst: PlayInstruction) -> R;
+    /// Called when command contains a [`CmpInstruction`].
     fn visit_cmp(self, inst: CmpInstruction) -> R;
+    /// Called when command contains a [`SetInstruction`].
     fn visit_set(self, inst: SetInstruction) -> R;
+    /// Called when command contains a [`SetSystemInstruction`].
     fn visit_set_system(self, inst: SetSystemInstruction) -> R;
 }
 
