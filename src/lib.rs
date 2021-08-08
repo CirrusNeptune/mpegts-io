@@ -1,4 +1,4 @@
-//! Library for reading and writing MPEG transport streams.
+//! Library for reading and (eventually) writing MPEG transport streams.
 //!
 //! # Usage
 //! Simply add this crate as a dependency in your `Cargo.toml`.
@@ -9,54 +9,81 @@
 //! ```
 
 #![allow(unused)]
-//#![deny(missing_docs, unsafe_code, warnings)]
+#![deny(missing_docs, unsafe_code, warnings)]
 
 use crc::{Crc, Digest, CRC_32_MPEG_2};
 use log::warn;
 use modular_bitfield_msb::prelude::*;
-use smallvec::SmallVec;
 use std::collections::{HashMap, HashSet};
 use std::convert::From;
 use std::fmt::{Debug, Formatter};
-use std::ops::Range;
-use std::rc::Rc;
 use std::result;
 
 mod slice_reader;
-use slice_reader::SliceReader;
+pub use slice_reader::SliceReader;
 
 mod payload_unit;
 use payload_unit::{PayloadUnitBuilder, PayloadUnitObject};
 
 mod psi;
-use psi::{Psi, PsiBuilder};
+use psi::PsiBuilder;
+pub use psi::{
+    Descriptor, ElementaryStreamInfo, ElementaryStreamInfoHeader, PatEntry, PmtHeader, Psi,
+    PsiData, PsiHeader, PsiTableSyntax,
+};
 
 mod pes;
-use pes::{Pes, PesUnitObject};
+pub use pes::{Pes, PesHeader, PesOptionalHeader, PesUnitObject};
 
-mod bdav;
-pub use bdav::{BdavParser, DefaultBdavAppDetails};
+pub mod bdav;
+use bdav::DefaultBdavAppDetails;
 
 const CRC: Crc<u32> = Crc::<u32>::new(&CRC_32_MPEG_2);
 type CrcDigest = Digest<'static, u32>;
 
+/// Errors that may be encountered while parsing an MPEG transport stream.
+///
+/// Contains built-in errors for packet headers, PSI, and PES parsing. Applications may extend this
+/// for their own payload parsers via [`AppDetails::AppErrorDetails`] in the
+/// [`ErrorDetails::AppError`] variant.
 #[derive(Debug)]
 pub enum ErrorDetails<D: AppDetails> {
+    /// Encountered when a [`SliceReader`] reads out of bounds.
+    /// The [`usize`] parameter is the length of the offending read.
     PacketOverrun(usize),
+    /// MPEG-TS packet headers must contain a sync byte of 0x47.
+    /// This is the error when encountering any other value.
     LostSync,
+    /// Encountered for inconsistent [`AdaptationFieldHeader`] parses.
     BadAdaptationHeader,
+    /// Encountered for inconsistent [`PsiHeader`] parses.
     BadPsiHeader,
+    /// Encountered for inconsistent [`PesHeader`] or [`PesOptionalHeader`] parses.
     BadPesHeader,
+    /// Encountered when a PSI unit fails CRC check.
     PsiCrcMismatch,
+    /// Application-defined error extension. Specified via [`AppDetails::AppErrorDetails`].
     AppError(D::AppErrorDetails),
 }
 
+/// Allows the application to extend the parser with PES payload parsers ([`PesUnitObject`])
+/// and an error extension variant for these parsers via [`ErrorDetails::AppError`].
+///
+/// See [`DefaultBdavAppDetails`] for an example of an application-defined AppDetails.
 pub trait AppDetails: Default {
+    /// The extension error type exposed via [`ErrorDetails::AppError`].
     type AppErrorDetails: Debug;
+
+    /// Application-defined function to map a PES unit-start packet's `pid` into a new
+    /// [`PesUnitObject`].
+    ///
+    /// The finished object will be returned to the application via [`Payload::Pes`] when the final
+    /// packet is read.
     fn new_pes_unit_data(pid: u16, unit_length: usize) -> Option<Box<dyn PesUnitObject<Self>>>;
 }
 
-#[derive(Default)]
+/// Basic [`AppDetails`] implementation with no added functionality.
+#[derive(Default, Debug)]
 pub struct DefaultAppDetails;
 
 impl AppDetails for DefaultAppDetails {
@@ -67,30 +94,34 @@ impl AppDetails for DefaultAppDetails {
     }
 }
 
+/// Error type encapsulating all possible parser errors.
 #[derive(Debug)]
 pub struct Error<D: AppDetails> {
-    location: usize,
-    details: ErrorDetails<D>,
+    /// Byte index within the packet that the error was encountered.
+    pub location: usize,
+    /// Information about the error.
+    pub details: ErrorDetails<D>,
 }
 
-impl<D: AppDetails> Error<D> {
-    pub fn new(location: usize, details: ErrorDetails<D>) -> Self {
-        Self { location, details }
-    }
-}
-
+/// [`std::result::Result`] alias that uses [`Error`].
 pub type Result<T, D> = result::Result<T, Error<D>>;
 
+/// TSC information used in a packet's payload.
 #[repr(u8)]
 #[derive(Debug, BitfieldSpecifier)]
 #[bits = 2]
 pub enum TransportScramblingControl {
+    /// Not scrambled.
     NotScrambled,
+    /// Do not use.
     Reserved,
+    /// Scrambled with even key.
     ScrambledEvenKey,
+    /// Scrambled with odd key.
     ScrambledOddKey,
 }
 
+/// Link-layer header found at the start of every 188-byte MPEG-TS packet.
 #[bitfield]
 #[derive(Debug)]
 pub struct PacketHeader {
@@ -105,6 +136,8 @@ pub struct PacketHeader {
     pub continuity_counter: B4,
 }
 
+/// Packets may contain adaptation meta data in addition or in lieu of payload data. This header
+/// specifies the particular type(s) of meta-data contained.
 #[bitfield]
 #[derive(Debug)]
 pub struct AdaptationFieldHeader {
@@ -119,6 +152,16 @@ pub struct AdaptationFieldHeader {
     pub has_adaptation_field_extension: bool,
 }
 
+/// Expands to [`format_args`] for a 90kHz timestamp of any integer type.
+///
+/// Format is <hours>:<minutes>:<seconds>:<90kHz-ticks>
+///
+/// # Example
+///
+/// ```
+/// use mpegts_io::pts_format_args;
+/// assert_eq!(std::fmt::format(pts_format_args!(900000)), "0:0:10:0");
+/// ```
 #[macro_export]
 macro_rules! pts_format_args {
     ($pts:expr) => {
@@ -132,9 +175,14 @@ macro_rules! pts_format_args {
     };
 }
 
+/// Program clock reference (PCR) for synchronizing the decoder with the encoder.
+///
+/// Periodically sent for every program contained in the transport stream.
 #[derive(Default, Copy, Clone)]
 pub struct PcrTimestamp {
+    /// 33-bits of a 90kHz base clock. May be formatted with [`pts_format_args`].
     pub base: u64,
+    /// 9-bits of a 27MHz clock rolling over every 300 counts to the base.
     pub extension: u16,
 }
 
@@ -147,30 +195,70 @@ impl Debug for PcrTimestamp {
     }
 }
 
+/// Non-payload packet metadata.
 #[derive(Debug)]
 pub struct AdaptationField {
+    /// Header describing which fields are contained.
     pub header: AdaptationFieldHeader,
+    /// Program Clock Reference.
     pub pcr: Option<PcrTimestamp>,
+    /// Original Program Clock Reference.
     pub opcr: Option<PcrTimestamp>,
 }
 
+/// Parsed payload of the packet.
+///
+/// If the packet is part of an incomplete payload unit, the appropriate pending variant is set.
 #[derive(Debug)]
 pub enum Payload<'a, D> {
-    Unknown,
+    /// Unhandled payload type; parsing is left to the application.
     Raw(SliceReader<'a, D>),
+    /// PSI payload unit is incomplete.
     PsiPending,
+    /// Complete parsed PSI payload.
     Psi(Psi),
+    /// PES payload unit is incomplete.
     PesPending,
+    /// Complete parsed PES payload.
     Pes(Pes<D>),
 }
 
+/// Top-level parsed structure for one MPEG-TS packet.
 #[derive(Debug)]
 pub struct Packet<'a, D> {
+    /// Packet link-layer header.
     pub header: PacketHeader,
+    /// Optional adaptation field metadata.
     pub adaptation_field: Option<AdaptationField>,
+    /// Optional payload data.
     pub payload: Option<Payload<'a, D>>,
 }
 
+/// MPEG-TS parser state capable of assembling payload units.
+///
+/// # Example
+///
+/// ```no_run
+/// use mpegts_io::{DefaultAppDetails, MpegTsParser};
+/// use std::fs::File;
+/// use std::io::{Read, Result, Seek, SeekFrom};
+///
+/// fn file_size(file: &mut File) -> Result<u64> {
+///     let len = file.seek(SeekFrom::End(0))?;
+///     file.seek(SeekFrom::Start(0))?;
+///     Ok(len)
+/// }
+///
+/// let mut file = File::open("00000.ts").expect("Unable to open!");
+/// let num_packets = file_size(&mut file).expect("Unable to get file size!") / 188;
+/// let mut parser = MpegTsParser::<DefaultAppDetails>::default();
+/// for _ in 0..num_packets {
+///     let mut packet = [0_u8; 188];
+///     file.read_exact(&mut packet).expect("IO Error!");
+///     let parsed_packet = parser.parse(&packet).expect("Parse Error!");
+///     println!("{:?}", parsed_packet);
+/// }
+/// ```
 #[derive(Default)]
 pub struct MpegTsParser<D: AppDetails = DefaultAppDetails> {
     pending_payload_units: HashMap<u16, PayloadUnitBuilder<D>>,
@@ -263,7 +351,7 @@ impl<D: AppDetails> MpegTsParser<D> {
             }
         } else {
             /* Attempt unit continuation */
-            self.continue_payload_unit(pid, &mut reader)
+            self.continue_payload_unit(pid, reader)
         }
     }
 
@@ -302,6 +390,13 @@ impl<D: AppDetails> MpegTsParser<D> {
         Ok(out)
     }
 
+    /// Parse data for exactly one 188-byte MPEG-TS packet.
+    ///
+    /// All information about the packet is returned as [`Packet`].
+    ///
+    /// For payload units that span multiple packets, the relevant pending state is provided in
+    /// [`Payload`]. Once the final packet of the unit is read, the entire unit is parsed and made
+    /// available in the [`Payload`].
     pub fn parse<'a>(&mut self, packet: &'a [u8; 188]) -> Result<Packet<'a, D>, D> {
         let reader = SliceReader::new(packet);
         self.parse_internal(reader)

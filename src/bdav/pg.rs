@@ -1,3 +1,6 @@
+//! Module for working with declarative program (PG) and interactive (IG) graphics streams used
+//! in Blu-Ray subtitles and menus.
+
 use super::{
     mobj::MObjCmd, read_bitfield, AppDetails, BdavAppDetails, BdavErrorDetails, MpegTsParser,
     PesUnitObject, SliceReader,
@@ -8,18 +11,27 @@ use modular_bitfield_msb::prelude::*;
 use num_derive::FromPrimitive;
 use num_traits::FromPrimitive;
 
+/// A YCbCrA palette entry.
 #[derive(Debug, Default, Copy, Clone)]
-pub(crate) struct PgsPaletteEntry {
+pub struct PgsPaletteEntry {
+    /// Luminance
     pub y: u8,
+    /// Red Chrominance
     pub cr: u8,
+    /// Blue Chrominance
     pub cb: u8,
+    /// Alpha
     pub t: u8,
 }
 
+/// A palette object that is referenced by a [`PgsObject`].
 #[derive(Debug)]
-pub(crate) struct PgsPalette {
+pub struct PgsPalette {
+    /// Palette ID
     pub id: u8,
+    /// Format version
     pub version: u8,
+    /// 256 palette entries
     pub entries: Box<[PgsPaletteEntry; 256]>,
 }
 
@@ -45,8 +57,9 @@ impl PgsPalette {
     }
 }
 
+/// An indexed-color image used within a graphics composition.
 #[derive(Debug)]
-pub(crate) struct PgsObject {}
+pub struct PgsObject {}
 
 impl PgsObject {
     fn parse<D: AppDetails>(reader: &mut SliceReader<D>) -> Result<Self, D> {
@@ -54,8 +67,9 @@ impl PgsObject {
     }
 }
 
+/// A program graphics composition.
 #[derive(Debug)]
-pub(crate) struct PgsPgComposition {}
+pub struct PgsPgComposition {}
 
 impl PgsPgComposition {
     fn parse<D: AppDetails>(reader: &mut SliceReader<D>) -> Result<Self, D> {
@@ -63,8 +77,9 @@ impl PgsPgComposition {
     }
 }
 
+/// TODO: Document me
 #[derive(Debug)]
-pub(crate) struct PgsWindow {}
+pub struct PgsWindow {}
 
 impl PgsWindow {
     fn parse<D: AppDetails>(reader: &mut SliceReader<D>) -> Result<Self, D> {
@@ -72,14 +87,22 @@ impl PgsWindow {
     }
 }
 
+/// Frame rate used for timing in an [`PgsIgComposition`].
 #[derive(Debug, Copy, Clone, PartialEq, FromPrimitive)]
-enum FrameRate {
+pub enum FrameRate {
+    /// Unspecified frame rate; animated effects not possible.
     Invalid,
+    /// 24000/1001 Hz
     Drop24,
+    /// 24 Hz
     NonDrop24,
+    /// 25 Hz
     NonDrop25,
+    /// 30000/1001 Hz
     Drop30,
+    /// 50 Hz
     NonDrop50,
+    /// 60000/1001 Hz
     Drop60,
 }
 
@@ -89,10 +112,14 @@ impl Default for FrameRate {
     }
 }
 
+/// Video viewport information for the graphics composition.
 #[derive(Debug)]
-pub(crate) struct PgVideoDescriptor {
+pub struct PgVideoDescriptor {
+    /// Width in pixels.
     video_width: u16,
+    /// Height in pixels.
     video_height: u16,
+    /// Frame rate.
     frame_rate: FrameRate,
 }
 
@@ -109,23 +136,50 @@ impl PgVideoDescriptor {
     }
 }
 
+/// Streaming information about a PG PES unit.
+#[repr(u8)]
+#[derive(Debug, FromPrimitive)]
+pub enum PgCompositionUnitState {
+    /// An object that adds to the composition being streamed.
+    Incremental,
+    /// First palette of a new set (clearing out the old one).
+    NewPalette,
+    /// Entirely new composition that clears all loaded composition objects.
+    NewComposition,
+}
+
+impl Default for PgCompositionUnitState {
+    fn default() -> Self {
+        PgCompositionUnitState::Incremental
+    }
+}
+
+/// Information about the sequence of PES units that make up a composition.
 #[derive(Debug)]
-pub(crate) struct PgCompositionDescriptor {
-    number: u16,
-    state: u8,
+pub struct PgCompositionDescriptor {
+    /// Number of PES units (palettes, objects, windows).
+    pub number: u16,
+    /// Streaming information about a PG PES unit.
+    pub state: PgCompositionUnitState,
 }
 
 impl PgCompositionDescriptor {
     fn parse<D: AppDetails>(reader: &mut SliceReader<D>) -> Result<Self, D> {
         let number = reader.read_be_u16()?;
         let state = reader.read_u8()?;
-        Ok(Self { number, state })
+        Ok(Self {
+            number,
+            state: FromPrimitive::from_u8(state).unwrap_or_default(),
+        })
     }
 }
 
+/// Flags that indicate the position of a composition in sequence.
 #[derive(Debug)]
-pub(crate) struct PgSequenceDescriptor {
+pub struct PgSequenceDescriptor {
+    /// Is first in sequence.
     pub first_in_seq: bool,
+    /// Is last in sequence.
     pub last_in_seq: bool,
 }
 
@@ -139,9 +193,10 @@ impl PgSequenceDescriptor {
     }
 }
 
+/// User operations mask.
 #[bitfield]
 #[derive(Debug)]
-pub(crate) struct UoMask {
+pub struct UoMask {
     pub menu_call: bool,
     pub title_search: bool,
     pub chapter_search: bool,
@@ -182,12 +237,19 @@ pub(crate) struct UoMask {
     pub unused3: B30,
 }
 
+/// Sub-rectangle in a composition for positioning [`PgCompositionObject`] objects in an
+/// [`IgEffectSequence`] or for [`PgsWindow`] objects within a [`PgsPgComposition`].
 #[derive(Debug)]
-pub(crate) struct IgWindow {
+pub struct IgWindow {
+    /// Window ID.
     pub id: u8,
+    /// X pos.
     pub x: u16,
+    /// Y pos.
     pub y: u16,
+    /// Width.
     pub width: u16,
+    /// Height.
     pub height: u16,
 }
 
@@ -208,11 +270,16 @@ impl IgWindow {
     }
 }
 
+/// Clipping dimensions for a [`PgCompositionObject`]
 #[derive(Debug)]
-pub(crate) struct PgCrop {
+pub struct PgCrop {
+    /// X Pos.
     pub x: u16,
+    /// Y Pos.
     pub y: u16,
+    /// Width.
     pub w: u16,
+    /// Height.
     pub h: u16,
 }
 
@@ -226,13 +293,20 @@ impl PgCrop {
     }
 }
 
+/// A positioned graphical element of a composition.
 #[derive(Debug)]
-pub(crate) struct PgCompositionObject {
+pub struct PgCompositionObject {
+    /// Object ID.
     pub object_id_ref: u16,
+    /// Window ID.
     pub window_id_ref: u8,
+    /// Forced display.
     pub forced_on_flag: bool,
+    /// X Pos.
     pub x: u16,
+    /// Y Pos.
     pub y: u16,
+    /// Optional clipping dimensions.
     pub crop: Option<PgCrop>,
 }
 
@@ -259,10 +333,14 @@ impl PgCompositionObject {
     }
 }
 
+/// A set of [`PgCompositionObject`] objects that are displayed for a fixed duration.
 #[derive(Debug)]
-pub(crate) struct IgEffect {
+pub struct IgEffect {
+    /// Display duration in 90kHz ticks.
     pub duration: u32,
+    /// Palette ID.
     pub palette_id_ref: u8,
+    /// Contained composition objects.
     pub composition_objects: Vec<PgCompositionObject>,
 }
 
@@ -283,9 +361,12 @@ impl IgEffect {
     }
 }
 
+/// Collects windows and effects to animate hide/show transitions of a composition.
 #[derive(Debug)]
-pub(crate) struct IgEffectSequence {
+pub struct IgEffectSequence {
+    /// Windows for composition objects contained in effects.
     pub windows: Vec<IgWindow>,
+    /// Timed composition objects for the effect sequence.
     pub effects: Vec<IgEffect>,
 }
 
@@ -305,27 +386,48 @@ impl IgEffectSequence {
     }
 }
 
+/// Complete definition of an interactive button.
 #[derive(Debug)]
-pub(crate) struct IgButton {
+pub struct IgButton {
+    /// Button ID.
     pub id: u16,
+    /// Remote control number pad equivalent.
     pub numeric_select_value: u16,
+    /// Auto activate when selected.
     pub auto_action_flag: bool,
+    /// X Pos.
     pub x_pos: u16,
+    /// Y Pos.
     pub y_pos: u16,
+    /// Button ID to navigate up.
     pub upper_button_id_ref: u16,
+    /// Button ID to navigate down.
     pub lower_button_id_ref: u16,
+    /// Button ID to navigate left.
     pub left_button_id_ref: u16,
+    /// Button ID to navigate right.
     pub right_button_id_ref: u16,
+    /// Ranged start of animated button frame object IDs (normal state).
     pub normal_start_object_id_ref: u16,
+    /// Ranged end of animated button frame object IDs (normal state).
     pub normal_end_object_id_ref: u16,
+    /// Loop animation (normal state).
     pub normal_repeat_flag: bool,
+    /// Sound ID when selected.
     pub selected_sound_id_ref: u8,
+    /// Ranged start of animated button frame object IDs (selected state).
     pub selected_start_object_id_ref: u16,
+    /// Ranged end of animated button frame object IDs (selected state).
     pub selected_end_object_id_ref: u16,
+    /// Loop animation (selected state).
     pub selected_repeat_flag: bool,
+    /// Sound ID when activated.
     pub activated_sound_id_ref: u8,
+    /// Ranged start of animated button frame object IDs (activated state).
     pub activated_start_object_id_ref: u16,
+    /// Ranged end of animated button frame object IDs (activated state).
     pub activated_end_object_id_ref: u16,
+    /// MObj commands executed when button is activated.
     pub nav_cmds: Vec<MObjCmd>,
 }
 
@@ -380,9 +482,12 @@ impl IgButton {
     }
 }
 
+/// Logical grouping of buttons used to implement selection hierarchies.
 #[derive(Debug)]
-pub(crate) struct IgBog {
+pub struct IgBog {
+    /// Default button ID within group.
     pub default_valid_button_id_ref: u16,
+    /// Buttons in group.
     pub buttons: Vec<IgButton>,
 }
 
@@ -401,17 +506,28 @@ impl IgBog {
     }
 }
 
+/// Collection of buttons such that only one is visible at a time.
 #[derive(Debug)]
-pub(crate) struct IgPage {
+pub struct IgPage {
+    /// Page ID.
     pub id: u8,
+    /// Format version.
     pub version: u8,
+    /// User operation mask.
     pub uo_mask: UoMask,
+    /// Animated show effects.
     pub in_effects: IgEffectSequence,
+    /// Animated hide effects.
     pub out_effects: IgEffectSequence,
+    /// Additional frames to delay next frame of animated buttons.
     pub animation_frame_rate_code: u8,
+    /// Default selected button ID.
     pub default_selected_button_id_ref: u16,
+    /// Default activated button ID.
     pub default_activated_button_id_ref: u16,
+    /// Palette ID.
     pub palette_id_ref: u8,
+    /// Button groups.
     pub bogs: Vec<IgBog>,
 }
 
@@ -446,13 +562,30 @@ impl IgPage {
     }
 }
 
+/// UI Model used in an [`IgInteractiveComposition`].
+#[repr(u8)]
+#[derive(Debug, FromPrimitive)]
+pub enum IgUiModel {
+    /// Always on menu.
+    AlwaysOn,
+    /// Popup menu.
+    Popup,
+}
+
+/// Interactive UI composition containing pages of buttons.
 #[derive(Debug)]
-pub(crate) struct IgInteractiveComposition {
+pub struct IgInteractiveComposition {
+    /// TODO: Figure this out
     pub stream_model: bool,
-    pub ui_model: bool,
+    /// Type of menu UI.
+    pub ui_model: IgUiModel,
+    /// TODO: Figure this out
     pub composition_timeout_pts: Option<u64>,
+    /// TODO: Figure this out
     pub selection_timeout_pts: Option<u64>,
+    /// Inactivity time to wait before hiding popup or returning to page 0 in 90kHz ticks.
     pub user_timeout_duration: u32,
+    /// Pages of composition
     pub pages: Vec<IgPage>,
 }
 
@@ -480,7 +613,11 @@ impl IgInteractiveComposition {
         }
         Ok(Self {
             stream_model,
-            ui_model: model_bits & 0x40 != 0,
+            ui_model: if model_bits & 0x40 != 0 {
+                IgUiModel::Popup
+            } else {
+                IgUiModel::AlwaysOn
+            },
             composition_timeout_pts,
             selection_timeout_pts,
             user_timeout_duration,
@@ -489,11 +626,16 @@ impl IgInteractiveComposition {
     }
 }
 
+/// Interactive composition unit containing top-level metadata.
 #[derive(Debug)]
-pub(crate) struct PgsIgComposition {
+pub struct PgsIgComposition {
+    /// Viewport and frame rate information.
     pub video_descriptor: PgVideoDescriptor,
+    /// Information about the sequence of PES units that make up the composition.
     pub composition_descriptor: PgCompositionDescriptor,
+    /// Flags that indicate the position of a composition in sequence.
     pub sequence_descriptor: PgSequenceDescriptor,
+    /// The composition tree.
     pub interactive_composition: IgInteractiveComposition,
 }
 
@@ -512,8 +654,9 @@ impl PgsIgComposition {
     }
 }
 
+/// Marks final PES unit and player is now be ready to display composition.
 #[derive(Debug)]
-pub(crate) struct PgsEndOfDisplay {}
+pub struct PgsEndOfDisplay {}
 
 impl PgsEndOfDisplay {
     fn parse<D: AppDetails>(reader: &mut SliceReader<D>) -> Result<Self, D> {
@@ -521,8 +664,9 @@ impl PgsEndOfDisplay {
     }
 }
 
+/// TODO: Document me.
 #[derive(Debug)]
-pub(crate) struct TgsDialogStyle {}
+pub struct TgsDialogStyle {}
 
 impl TgsDialogStyle {
     fn parse<D: AppDetails>(reader: &mut SliceReader<D>) -> Result<Self, D> {
@@ -530,8 +674,9 @@ impl TgsDialogStyle {
     }
 }
 
+/// TODO: Document me.
 #[derive(Debug)]
-pub(crate) struct TgsDialogPresentation {}
+pub struct TgsDialogPresentation {}
 
 impl TgsDialogPresentation {
     fn parse<D: AppDetails>(reader: &mut SliceReader<D>) -> Result<Self, D> {
@@ -543,12 +688,14 @@ macro_rules! pg_segment_data {
     // Exit rule.
     (
         @collect_unitary_variants
-        ($(,)*) -> ($($var:ident = $val:expr,)*)
+        ($(,)*) -> ($($(#[$vattr:meta])* $var:ident = $val:expr,)*)
     ) => {
+        /// A PES unit that starts with raw data and gets converted to parsed form at end.
         #[derive(Debug)]
-        pub(crate) enum PgSegmentData {
+        pub enum PgSegmentData {
+            /// Unparsed PES payload data for accumulating packets.
             Raw(Vec<u8>),
-            $($var($var),)*
+            $($(#[$vattr])* $var($var),)*
         }
 
         fn parse_pg_segment_data<D: BdavAppDetails>(reader: &mut SliceReader<D>) -> Result<PgSegmentData, D> {
@@ -558,7 +705,7 @@ macro_rules! pg_segment_data {
 
             let ret = match seg_type {
                 $($val => Ok(PgSegmentData::$var($var::parse(&mut seg_reader)?)),)*
-                _ => Err(seg_reader.make_error(ErrorDetails::<D>::AppError(BdavErrorDetails::UnknownIgSegmentType(seg_type))))
+                _ => Err(seg_reader.make_error(ErrorDetails::<D>::AppError(BdavErrorDetails::UnknownPgSegmentType(seg_type))))
             };
 
             if seg_reader.remaining_len() > 0 {
@@ -572,11 +719,11 @@ macro_rules! pg_segment_data {
     // Handle a variant.
     (
         @collect_unitary_variants
-        ($var:ident = $val:expr, $($tail:tt)*) -> ($($var_names:tt)*)
+        ($(#[$vattr:meta])* $var:ident = $val:expr, $($tail:tt)*) -> ($($var_names:tt)*)
     ) => {
         pg_segment_data! {
             @collect_unitary_variants
-            ($($tail)*) -> ($($var_names)* $var = $val,)
+            ($($tail)*) -> ($($var_names)* $(#[$vattr])* $var = $val,)
         }
     };
 
@@ -590,13 +737,21 @@ macro_rules! pg_segment_data {
 }
 
 pg_segment_data! {
+    /// Palette object.
     PgsPalette = 0x14,
+    /// Graphical Object object.
     PgsObject = 0x15,
+    /// Program Graphics Composition object.
     PgsPgComposition = 0x16,
+    /// Program Graphics Window object.
     PgsWindow = 0x17,
+    /// Interactive Graphics Composition object.
     PgsIgComposition = 0x18,
+    /// End of display mark.
     PgsEndOfDisplay = 0x80,
+    /// TODO: Document me.
     TgsDialogStyle = 0x81,
+    /// TODO: Document me.
     TgsDialogPresentation = 0x82,
 }
 

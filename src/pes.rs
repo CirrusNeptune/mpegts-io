@@ -7,6 +7,7 @@ use modular_bitfield_msb::prelude::*;
 use std::fmt::{Arguments, Debug, DebugStruct, Formatter};
 use std::rc::Rc;
 
+/// Header of PES unit.
 #[bitfield]
 #[derive(Debug)]
 pub struct PesHeader {
@@ -15,6 +16,7 @@ pub struct PesHeader {
     pub packet_length: B16,
 }
 
+/// Optional header of PES unit.
 #[bitfield]
 #[derive(Debug)]
 pub struct PesOptionalHeader {
@@ -35,8 +37,12 @@ pub struct PesOptionalHeader {
     pub additional_header_length: B8,
 }
 
+/// An elementary stream object that can be incrementally assembled from multiple
+/// sequential payloads and finished once the expected payload length has been read.
 pub trait PesUnitObject<D: AppDetails>: Debug {
+    /// Appends a slice of data to the payload unit.
     fn extend_from_slice(&mut self, slice: &[u8]);
+    /// Finishes a payload unit after the last slice is appended.
     fn finish(&mut self, pid: u16, parser: &mut MpegTsParser<D>) -> Result<(), D>;
 }
 
@@ -67,30 +73,21 @@ impl<D: AppDetails> PesUnitObject<D> for RawPesData {
     }
 }
 
+/// Parsed Packetized Elementary Stream data (PES).
+///
+/// Encapsulates the actual program A/V content.
+/// Reference: <https://en.wikipedia.org/wiki/Packetized_elementary_stream>
 pub struct Pes<D> {
+    /// PES Header.
     pub header: PesHeader,
+    /// Extra header present when there is enough data and the stream ID is not 0xBF.
     pub optional_header: Option<PesOptionalHeader>,
+    /// Presentation time stamp.
     pub pts: Option<u64>,
+    /// Decoder time stamp.
     pub dts: Option<u64>,
+    /// PES data which is incomplete until the final packet arrives.
     pub data: Box<dyn PesUnitObject<D>>,
-}
-
-impl<D> Pes<D> {
-    pub fn new(
-        header: PesHeader,
-        optional_header: Option<PesOptionalHeader>,
-        pts: Option<u64>,
-        dts: Option<u64>,
-        data: Box<dyn PesUnitObject<D>>,
-    ) -> Self {
-        Self {
-            header,
-            optional_header,
-            pts,
-            dts,
-            data,
-        }
-    }
 }
 
 impl<D: AppDetails> PayloadUnitObject<D> for Pes<D> {
@@ -134,12 +131,12 @@ impl<D: AppDetails> MpegTsParser<D> {
         pid: u16,
         reader: &mut SliceReader<'a, D>,
     ) -> Result<Payload<'a, D>, D> {
-        let pes_header = read_bitfield!(reader, PesHeader);
-        let pes_length = pes_header.packet_length() as usize;
+        let header = read_bitfield!(reader, PesHeader);
+        let pes_length = header.packet_length() as usize;
         let mut optional_length = 0;
         let mut pts = None;
         let mut dts = None;
-        let pes_optional = if pes_length >= 3 && pes_header.stream_id() != 0xBF {
+        let optional_header = if pes_length >= 3 && header.stream_id() != 0xBF {
             let pes_optional = read_bitfield!(reader, PesOptionalHeader);
             let additional_length = pes_optional.additional_header_length() as usize;
             optional_length = 3 + additional_length;
@@ -169,14 +166,20 @@ impl<D: AppDetails> MpegTsParser<D> {
 
         let unit_length = pes_length - optional_length;
 
-        let unit_data = if let Some(unit_data) = D::new_pes_unit_data(pid, unit_length) {
+        let data = if let Some(unit_data) = D::new_pes_unit_data(pid, unit_length) {
             unit_data
         } else {
             Box::new(RawPesData::new(unit_length))
         };
 
         self.start_payload_unit(
-            Pes::new(pes_header, pes_optional, pts, dts, unit_data),
+            Pes {
+                header,
+                optional_header,
+                pts,
+                dts,
+                data,
+            },
             unit_length,
             pid,
             reader,

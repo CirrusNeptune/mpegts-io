@@ -1,3 +1,6 @@
+//! Module for assembling and disassembling MObj bytecode found in MovieObject.bdmv and IG button
+//! navigation commands.
+
 use super::{read_bitfield, AppDetails, Result, SliceReader};
 use lalrpop_util::{lalrpop_mod, lexer::Token, ParseError};
 use modular_bitfield_msb::prelude::*;
@@ -14,22 +17,31 @@ lalrpop_mod!(
     "/bdav/mobj.rs"
 );
 
+/// Errors that may be encountered by the MObj assembly parser.
 #[derive(Debug, PartialEq)]
 pub enum MObjParseErrorType {
+    /// A number out of [`u32`] range was encountered.
     U32OutOfRange,
+    /// A GPR register out of 0..=4095 was encountered.
     GprOutOfRange,
+    /// A PSR register out of 0..=127 was encountered.
     PsrOutOfRange,
+    /// `set_stream` requires audio/subtitle and ig/angle operands are both registers or both
+    /// immediates. This is encountered when this constraint is violated.
     SetStreamOperandTypeMismatch,
 }
 
+/// MObj errors from the MObj assembly parser.
 #[derive(Debug, PartialEq)]
 pub struct MObjParseErrorDetails {
     range: Range<usize>,
     error_type: MObjParseErrorType,
 }
 
+/// Aliased [`ParseError`] that adds MObj-specific errors.
 pub type MObjParseError<'a> = ParseError<usize, Token<'a>, MObjParseErrorDetails>;
 
+/// Writes out a highlighted-text string displaying the [`MObjParseError`].
 pub fn write_parse_error(
     text: &str,
     error: &MObjParseError,
@@ -102,20 +114,16 @@ pub fn write_parse_error(
     Ok(())
 }
 
-#[derive(Debug)]
-pub enum MObjError {
-    InstructionDoesNotExist(String),
-}
-
 macro_rules! instruction_enum {
     // Exit rule.
     (
-        @collect_unitary_variants $name:ident,
-        ($(,)*) -> ($($var:ident($str:expr) $(= $num:expr)*,)*)
+        @collect_unitary_variants $(#[$attr:meta])* $name:ident,
+        ($(,)*) -> ($($(#[$vattr:meta])* $var:ident($str:expr) $(= $num:expr)*,)*)
     ) => {
+        $(#[$attr])*
         #[derive(Debug, Copy, Clone, PartialEq, FromPrimitive)]
-        pub(crate) enum $name {
-            $($var $(= $num)*,)*
+        pub enum $name {
+            $($(#[$vattr])* $var $(= $num)*,)*
         }
 
         impl $name {
@@ -131,143 +139,197 @@ macro_rules! instruction_enum {
                 f.write_str(self.mnemonic())
             }
         }
-
-        impl FromStr for $name {
-            type Err = MObjError;
-
-            fn from_str(s: &str) -> std::result::Result<Self, MObjError> {
-                let upper_s = s.to_lowercase();
-                match upper_s.as_str() {
-                    $($str => Ok($name::$var),)*
-                    _ => Err(MObjError::InstructionDoesNotExist(upper_s)),
-                }
-            }
-        }
     };
 
     // Handle a variant.
     (
-        @collect_unitary_variants $name:ident,
-        ($var:ident($str:expr) $(= $num:expr)*, $($tail:tt)*) -> ($($var_names:tt)*)
+        @collect_unitary_variants $(#[$attr:meta])* $name:ident,
+        ($(#[$vattr:meta])* $var:ident($str:expr) $(= $num:expr)*, $($tail:tt)*) -> ($($var_names:tt)*)
     ) => {
         instruction_enum! {
-            @collect_unitary_variants $name,
-            ($($tail)*) -> ($($var_names)* $var($str) $(= $num)*,)
+            @collect_unitary_variants $(#[$attr])* $name,
+            ($($tail)*) -> ($($var_names)* $(#[$vattr])* $var($str) $(= $num)*,)
         }
     };
 
     // Entry rule.
-    ($name:ident { $($body:tt)* }) => {
+    ($(#[$attr:meta])* $name:ident { $($body:tt)* }) => {
         instruction_enum! {
-            @collect_unitary_variants $name,
+            @collect_unitary_variants $(#[$attr])* $name,
             ($($body)*,) -> ()
         }
     };
 }
 
+/// Top-level MObj instruction group.
 #[repr(u8)]
 #[derive(Debug, BitfieldSpecifier)]
 #[bits = 2]
-pub(crate) enum MObjGroup {
+pub enum MObjGroup {
+    /// Selects [`BranchSubGroup`].
     Branch,
+    /// Selects [`CmpInstruction`].
     Cmp,
+    /// Selects [`SetSubGroup`].
     Set,
 }
 
+/// Branch instruction group.
 #[derive(Debug, Copy, Clone, PartialEq, FromPrimitive)]
-pub(crate) enum BranchSubGroup {
+pub enum BranchSubGroup {
+    /// Selects [`GotoInstruction`].
     Goto,
+    /// Selects [`JumpInstruction`].
     Jump,
+    /// Selects [`PlayInstruction`].
     Play,
 }
 
 instruction_enum! {
+    /// Goto instructions.
     GotoInstruction {
+        /// `nop`
         Nop("nop"),
+        /// `goto <pc>`
         Goto("goto"),
+        /// `break`
         Break("break"),
     }
 }
 
 instruction_enum! {
+    /// Jump instructions.
     JumpInstruction {
+        /// `jump_object <id>`
         JumpObject("jump_object"),
+        /// `jump_title <id>`
         JumpTitle("jump_title"),
+        /// `call_object <id>`
         CallObject("call_object"),
+        /// `call_title <id>`
         CallTitle("call_title"),
+        /// `resume`
         Resume("resume"),
     }
 }
 
 instruction_enum! {
+    /// Play instructions.
     PlayInstruction {
+        /// `play_pl <id>`
         PlayPlaylist("play_pl"),
+        /// `play_pl_pi <id> <id>`
         PlayPlaylistItem("play_pl_pi"),
+        /// `play_pl_pm <id> <id>`
         PlayPlaylistMark("play_pl_pm"),
+        /// `terminate_pl`
         TerminatePlaylist("terminate_pl"),
+        /// `link_pi <id>`
         LinkItem("link_pi"),
+        /// `link_mk <id>`
         LinkMark("link_mk"),
     }
 }
 
 instruction_enum! {
+    /// Cmp instructions.
     CmpInstruction {
+        /// `bc <a> <b>`
         Bc("bc") = 0x1,
+        /// `eq <a> <b>`
         Eq("eq"),
+        /// `ne <a> <b>`
         Ne("ne"),
+        /// `ge <a> <b>`
         Ge("ge"),
+        /// `gt <a> <b>`
         Gt("gt"),
+        /// `le <a> <b>`
         Le("le"),
+        /// `lt <a> <b>`
         Lt("lt"),
     }
 }
 
+/// Set instruction group.
 #[derive(Debug, Copy, Clone, PartialEq, FromPrimitive)]
-pub(crate) enum SetSubGroup {
+pub enum SetSubGroup {
+    /// Selects [`SetInstruction`].
     Set,
+    /// Selects [`SetSystemInstruction`].
     SetSystem,
 }
 
 instruction_enum! {
+    /// Set instructions.
     SetInstruction {
+        /// `move <a> <b>`
         Move("move") = 0x1,
+        /// `swap <a> <b>`
         Swap("swap"),
+        /// `add <a> <b>`
         Add("add"),
+        /// `sub <a> <b>`
         Sub("sub"),
+        /// `mul <a> <b>`
         Mul("mul"),
+        /// `div <a> <b>`
         Div("div"),
+        /// `mod <a> <b>`
         Mod("mod"),
+        /// `rnd <a> <b>`
         Rnd("rnd"),
+        /// `and <a> <b>`
         And("and"),
+        /// `or <a> <b>`
         Or("or"),
+        /// `xor <a> <b>`
         Xor("xor"),
+        /// `bset <a> <b>`
         Bitset("bset"),
+        /// `bclr <a> <b>`
         Bitclr("bclr"),
+        /// `shl <a> <b>`
         Shl("shl"),
+        /// `shr <a> <b>`
         Shr("shr"),
     }
 }
 
 instruction_enum! {
+    /// SetSystem instructions.
     SetSystemInstruction {
+        /// `set_stream <audio-id>, <subtitle-id>, <subtitle "enabled"|"disabled">, <ig-id>, <angle-id>`
         SetStream("set_stream") = 0x1,
+        /// `set_nv_timer <a> <b>`
         SetNvTimer("set_nv_timer"),
+        /// `set_nv_timer <button-id> <page-id>`
         SetButtonPage("set_button_page"),
+        /// `enable_button <button-id>`
         EnableButton("enable_button"),
+        /// `disable_button <button-id>`
         DisableButton("disable_button"),
+        /// `set_sec_stream <a> <b>`
         SetSecStream("set_sec_stream"),
+        /// `popup_off`
         PopupOff("popup_off"),
+        /// `still_on`
         StillOn("still_on"),
+        /// `still_off`
         StillOff("still_off"),
+        /// `set_output_mode <a>`
         SetOutputMode("set_output_mode"),
+        /// `set_stream_ss <audio-id>, <subtitle-id>, <subtitle "enabled"|"disabled">, <ig-id>, <angle-id>`
         SetStreamSs("set_stream_ss"),
+        /// `bd_plus_msg <a> <b>`
         BdPlusMsg("bd_plus_msg") = 0x10,
     }
 }
 
+/// Operation information of one [`MObjCmd`]
 #[bitfield]
 #[derive(Debug)]
-pub(crate) struct MObjInstruction {
+pub struct MObjInstruction {
     pub op_cnt: B3,
     pub grp: MObjGroup,
     pub sub_grp: B3,
@@ -284,9 +346,13 @@ pub(crate) struct MObjInstruction {
     pub set_opt: B5,
 }
 
-pub(crate) struct MObjCmd {
+/// A command in the MObj VM.
+pub struct MObjCmd {
+    /// Operation information.
     pub inst: MObjInstruction,
+    /// Dst operand.
     pub dst: u32,
+    /// Src operand.
     pub src: u32,
 }
 

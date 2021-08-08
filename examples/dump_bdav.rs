@@ -1,4 +1,4 @@
-use mpegts_io::{BdavParser, DefaultBdavAppDetails, Payload};
+use mpegts_io::{bdav::BdavParser, Payload};
 use pretty_env_logger;
 use std::env;
 use std::fs::File;
@@ -19,7 +19,7 @@ fn main() {
     let file_path = args.skip(1).next().unwrap();
     let mut file = File::open(file_path).expect("unable to open!");
     let num_packets = file_size(&mut file).expect("unable to get file size") / 192;
-    let mut parser = BdavParser::<DefaultBdavAppDetails>::default();
+    let mut parser = BdavParser::default();
     for _ in 0..num_packets {
         let mut packet = [0_u8; 192];
         file.read_exact(&mut packet).expect("IO Error!");

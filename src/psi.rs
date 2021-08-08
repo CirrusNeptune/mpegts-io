@@ -7,6 +7,7 @@ use modular_bitfield_msb::prelude::*;
 use smallvec::SmallVec;
 use std::marker::PhantomData;
 
+/// Header of PSI unit.
 #[bitfield]
 #[derive(Debug)]
 pub struct PsiHeader {
@@ -19,6 +20,7 @@ pub struct PsiHeader {
     pub section_length: B10,
 }
 
+/// Optional table syntax of PSI unit.
 #[bitfield]
 #[derive(Debug)]
 pub struct PsiTableSyntax {
@@ -30,6 +32,7 @@ pub struct PsiTableSyntax {
     pub last_section_num: B8,
 }
 
+/// Entry of PAT.
 #[bitfield]
 #[derive(Debug)]
 pub struct PatEntry {
@@ -38,14 +41,17 @@ pub struct PatEntry {
     pub program_map_pid: B13,
 }
 
+/// General purposed tagged data.
 #[derive(Debug)]
 pub struct Descriptor {
+    /// Tag of data's purpose.
     pub tag: u8,
+    /// Data.
     pub data: SmallVec<[u8; 8]>,
 }
 
 impl Descriptor {
-    pub fn new_from_reader<D: AppDetails>(reader: &mut SliceReader<D>) -> Result<Self, D> {
+    pub(crate) fn new_from_reader<D: AppDetails>(reader: &mut SliceReader<D>) -> Result<Self, D> {
         let tag = reader.read_u8()?;
         let len = reader.read_u8()?;
         let mut data = SmallVec::<[u8; 8]>::new();
@@ -54,6 +60,7 @@ impl Descriptor {
     }
 }
 
+/// Header of PMT unit.
 #[bitfield]
 #[derive(Debug)]
 pub struct PmtHeader {
@@ -65,6 +72,7 @@ pub struct PmtHeader {
     pub program_info_length: B10,
 }
 
+/// Elementary stream info header.
 #[bitfield]
 #[derive(Debug)]
 pub struct ElementaryStreamInfoHeader {
@@ -77,12 +85,16 @@ pub struct ElementaryStreamInfoHeader {
     pub es_info_length: B10,
 }
 
+/// Elementary stream info.
 #[derive(Debug)]
 pub struct ElementaryStreamInfo {
+    /// Elementary stream info header.
     pub header: ElementaryStreamInfoHeader,
+    /// Metadata descriptors.
     pub es_descriptors: SmallVec<[Descriptor; 4]>,
 }
 
+/// Parsed PMT unit.
 #[derive(Debug)]
 pub struct Pmt {
     pub header: PmtHeader,
@@ -90,21 +102,32 @@ pub struct Pmt {
     pub es_infos: Vec<ElementaryStreamInfo>,
 }
 
+/// Parsed PSI payload unit.
 #[derive(Debug)]
 pub enum PsiData {
+    /// Raw unit data.
     Raw(Vec<u8>),
+    /// PAT entries.
     Pat(Vec<PatEntry>),
+    /// PMT.
     Pmt(Pmt),
 }
 
+/// Parsed Program Specific Information data (PSI).
+///
+/// Encapsulates tables like PAT/PMT/NIT/CAT.
+/// Reference: <https://en.wikipedia.org/wiki/Program-specific_information>
 #[derive(Debug)]
 pub struct Psi {
+    /// PSI Header.
     pub header: PsiHeader,
+    /// Optional table syntax information.
     pub table_syntax: Option<PsiTableSyntax>,
+    /// Parsed PSI table data.
     pub data: PsiData,
 }
 
-pub struct PsiBuilder<D> {
+pub(crate) struct PsiBuilder<D> {
     phantom: PhantomData<D>,
     header: PsiHeader,
     table_syntax: Option<PsiTableSyntax>,
@@ -200,7 +223,10 @@ impl<D: AppDetails> PayloadUnitObject<D> for PsiBuilder<D> {
         let expected_hash = SliceReader::new(&self.data[len_minus_crc..]).read_be_u32()?;
         if expected_hash != actual_hash {
             warn!("PSI hash mismatch for PID: {:x}", pid);
-            return Err(Error::new(0, ErrorDetails::<D>::PsiCrcMismatch));
+            return Err(Error {
+                location: 0,
+                details: ErrorDetails::<D>::PsiCrcMismatch,
+            });
         }
         self.data.truncate(len_minus_crc);
 

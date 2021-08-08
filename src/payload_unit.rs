@@ -77,11 +77,11 @@ impl<D: AppDetails> MpegTsParser<D> {
     pub(crate) fn continue_payload_unit<'a>(
         &mut self,
         pid: u16,
-        reader: &mut SliceReader<'a, D>,
+        mut reader: SliceReader<'a, D>,
     ) -> Result<Payload<'a, D>, D> {
         match self.pending_payload_units.get_mut(&pid) {
             Some(pes_state) => {
-                if pes_state.append(reader)? {
+                if pes_state.append(&mut reader)? {
                     self.pending_payload_units
                         .remove(&pid)
                         .unwrap()
@@ -92,10 +92,11 @@ impl<D: AppDetails> MpegTsParser<D> {
             }
             None => {
                 warn!(
-                    "Discarding payload unit of unknown continuation PID: {:x}",
+                    "Unknown payload continuation on non-start packet for PID: {:x}",
                     pid
                 );
-                Ok(Payload::Unknown)
+                /* Assume raw */
+                Ok(Payload::Raw(reader))
             }
         }
     }
