@@ -40,10 +40,6 @@ pub trait PesUnitObject<D: AppDetails>: Debug {
     fn finish(&mut self, pid: u16, parser: &mut MpegTsParser<D>) -> Result<(), D>;
 }
 
-pub trait PesUnitObjectFactory<D> {
-    fn construct(&self, pid: u16, capacity: usize) -> Box<dyn PesUnitObject<D>>;
-}
-
 #[derive(Default)]
 struct RawPesData(Vec<u8>);
 

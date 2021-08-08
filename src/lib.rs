@@ -32,7 +32,7 @@ mod psi;
 use psi::{Psi, PsiBuilder};
 
 mod pes;
-use pes::{Pes, PesUnitObject, PesUnitObjectFactory};
+use pes::{Pes, PesUnitObject};
 
 mod bdav;
 pub use bdav::{BdavParser, DefaultBdavAppDetails};

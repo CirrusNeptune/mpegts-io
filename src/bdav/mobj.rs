@@ -4,6 +4,8 @@ use modular_bitfield_msb::prelude::*;
 use num_derive::FromPrimitive;
 use num_traits::FromPrimitive;
 use std::fmt::{Debug, Display, Formatter};
+use std::io::Write;
+use std::ops::Range;
 use std::str::FromStr;
 
 lalrpop_mod!(
@@ -13,32 +15,96 @@ lalrpop_mod!(
 );
 
 #[derive(Debug, PartialEq)]
-pub enum MObjParseErrorDetails {
+pub enum MObjParseErrorType {
+    U32OutOfRange,
     GprOutOfRange,
     PsrOutOfRange,
+    SetStreamOperandTypeMismatch,
+}
+
+#[derive(Debug, PartialEq)]
+pub struct MObjParseErrorDetails {
+    range: Range<usize>,
+    error_type: MObjParseErrorType,
 }
 
 pub type MObjParseError<'a> = ParseError<usize, Token<'a>, MObjParseErrorDetails>;
 
+pub fn write_parse_error(
+    text: &str,
+    error: &MObjParseError,
+    out: &mut dyn Write,
+) -> std::io::Result<()> {
+    struct Repeat(char, usize);
+
+    impl Display for Repeat {
+        fn fmt(&self, fmt: &mut Formatter) -> std::fmt::Result {
+            for _ in 0..self.1 {
+                write!(fmt, "{}", self.0)?;
+            }
+            Ok(())
+        }
+    }
+
+    fn write_expected(out: &mut dyn Write, expected: &[String]) -> std::io::Result<()> {
+        writeln!(out, "  Acceptable tokens:")?;
+        for t in expected {
+            writeln!(out, "  * {}", t)?;
+        }
+        Ok(())
+    }
+
+    let (start_col, end_col) = match error {
+        ParseError::InvalidToken { location } => {
+            writeln!(out, "Unexpected token encountered by parser")?;
+            (*location, *location)
+        }
+        ParseError::UnrecognizedEOF { location, expected } => {
+            writeln!(out, "Unexpected EOF encountered by parser")?;
+            write_expected(out, expected)?;
+            (*location, *location)
+        }
+        ParseError::UnrecognizedToken { token, expected } => {
+            writeln!(out, "Unrecognized token encountered by parser")?;
+            write_expected(out, expected)?;
+            (token.0, token.2)
+        }
+        ParseError::ExtraToken { token } => {
+            writeln!(out, "Extra tokens encountered by parser")?;
+            (token.0, token.2)
+        }
+        ParseError::User { error } => {
+            match error.error_type {
+                MObjParseErrorType::U32OutOfRange => writeln!(out, "All numbers must be in u32 range")?,
+                MObjParseErrorType::GprOutOfRange => writeln!(out, "GPR out of range 0..=4095")?,
+                MObjParseErrorType::PsrOutOfRange => writeln!(out, "PSR out of range 0..=127")?,
+                MObjParseErrorType::SetStreamOperandTypeMismatch =>
+                    writeln!(out, "audio/subtitle and ig/angle operands must be both registers or both immediates")?,
+            }
+            (error.range.start, error.range.end)
+        }
+    };
+
+    writeln!(out, "  {}", text)?;
+
+    if end_col - start_col <= 1 {
+        writeln!(out, "  {}^", Repeat(' ', start_col))?;
+    } else {
+        let width = end_col - start_col;
+        writeln!(
+            out,
+            "  {}~{}~",
+            Repeat(' ', start_col),
+            Repeat('~', width.saturating_sub(2))
+        )?;
+    }
+
+    Ok(())
+}
+
 #[derive(Debug)]
 pub enum MObjError {
     InstructionDoesNotExist(String),
-}
-
-#[repr(u8)]
-#[derive(Debug, BitfieldSpecifier)]
-#[bits = 2]
-pub(crate) enum MObjGroup {
-    Branch,
-    Cmp,
-    Set,
-}
-
-#[derive(Debug, Copy, Clone, PartialEq, FromPrimitive)]
-pub(crate) enum BranchSubGroup {
-    Goto,
-    Jump,
-    Play,
 }
 
 macro_rules! instruction_enum {
@@ -97,6 +163,22 @@ macro_rules! instruction_enum {
             ($($body)*,) -> ()
         }
     };
+}
+
+#[repr(u8)]
+#[derive(Debug, BitfieldSpecifier)]
+#[bits = 2]
+pub(crate) enum MObjGroup {
+    Branch,
+    Cmp,
+    Set,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, FromPrimitive)]
+pub(crate) enum BranchSubGroup {
+    Goto,
+    Jump,
+    Play,
 }
 
 instruction_enum! {
@@ -316,9 +398,9 @@ macro_rules! format_cmd {
                                 }
                                 f.write_str(", ")?;
                                 if pg_text_st_enabled {
-                                    f.write_str("text_st_enabled")?;
+                                    f.write_str("enabled")?;
                                 } else {
-                                    f.write_str("text_st_disabled")?;
+                                    f.write_str("disabled")?;
                                 }
                                 f.write_str(", ")?;
                                 if ig_flag {
@@ -426,7 +508,7 @@ impl MObjCmdVisitor<&'static str> for GetCmdMnemonic {
     }
 }
 
-#[derive(PartialEq)]
+#[derive(PartialEq, Copy, Clone)]
 pub(crate) enum MObjOperand {
     Gpr(u32),
     Psr(u32),
@@ -551,37 +633,179 @@ impl Debug for MObjOperand {
     }
 }
 
+fn check_set_stream_operands<'a>(
+    range: Range<usize>,
+    op1: &Option<MObjOperand>,
+    op2: &Option<MObjOperand>,
+) -> std::result::Result<(), MObjParseError<'a>> {
+    if let (Some(op1), Some(op2)) = (op1, op2) {
+        if op1.is_imm() != op2.is_imm() {
+            return Err(ParseError::User {
+                error: MObjParseErrorDetails {
+                    range,
+                    error_type: MObjParseErrorType::SetStreamOperandTypeMismatch,
+                },
+            });
+        }
+    }
+    Ok(())
+}
+
+fn is_optional_operand_imm(op: &Option<MObjOperand>) -> bool {
+    if let Some(op) = op {
+        op.is_imm()
+    } else {
+        false
+    }
+}
+
+fn set_stream_operand_to_val(op: &Option<MObjOperand>) -> u32 {
+    if let Some(op) = op {
+        0x8000 | ((*op).into_val() & 0xfff)
+    } else {
+        0x0
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn make_set_stream_cmd<'a>(
+    instruction: SetSystemInstruction,
+    range1: Range<usize>,
+    primary_audio: Option<MObjOperand>,
+    pg_text_st: Option<MObjOperand>,
+    pg_text_st_enabled: bool,
+    range2: Range<usize>,
+    ig: Option<MObjOperand>,
+    angle: Option<MObjOperand>,
+) -> std::result::Result<MObjCmd, MObjParseError<'a>> {
+    assert!(
+        instruction == SetSystemInstruction::SetStream
+            || instruction == SetSystemInstruction::SetStreamSs
+    );
+    check_set_stream_operands(range1, &primary_audio, &pg_text_st)?;
+    check_set_stream_operands(range2, &ig, &angle)?;
+
+    let primary_audio_val = set_stream_operand_to_val(&primary_audio);
+    let pg_text_st_val = set_stream_operand_to_val(&pg_text_st);
+    let dst_val =
+        primary_audio_val << 16 | pg_text_st_val | if pg_text_st_enabled { 0x4000 } else { 0x0 };
+
+    let ig_val = set_stream_operand_to_val(&ig);
+    let angle_val = set_stream_operand_to_val(&angle);
+    let src_val = ig_val << 16 | angle_val;
+
+    Ok(MObjCmd {
+        inst: MObjInstruction::new()
+            .with_op_cnt(2)
+            .with_grp(MObjGroup::Set)
+            .with_sub_grp(SetSubGroup::SetSystem as u8)
+            .with_imm_op1(is_optional_operand_imm(&primary_audio))
+            .with_imm_op2(is_optional_operand_imm(&ig))
+            .with_set_opt(instruction as u8),
+        dst: dst_val,
+        src: src_val,
+    })
+}
+
+fn set_button_page_operand_to_val(op: &Option<MObjOperand>) -> u32 {
+    if let Some(op) = op {
+        0x80000000 | ((*op).into_val() & 0x3fffffff)
+    } else {
+        0x0
+    }
+}
+
+pub(crate) fn make_set_button_page_cmd<'a>(
+    button: Option<MObjOperand>,
+    page: Option<MObjOperand>,
+    skip_out: bool,
+) -> std::result::Result<MObjCmd, MObjParseError<'a>> {
+    let dst_val = set_button_page_operand_to_val(&button);
+    let src_val = set_button_page_operand_to_val(&page) | if skip_out { 0x40000000 } else { 0x0 };
+
+    Ok(MObjCmd {
+        inst: MObjInstruction::new()
+            .with_op_cnt(2)
+            .with_grp(MObjGroup::Set)
+            .with_sub_grp(SetSubGroup::SetSystem as u8)
+            .with_imm_op1(is_optional_operand_imm(&button))
+            .with_imm_op2(is_optional_operand_imm(&page))
+            .with_set_opt(SetSystemInstruction::SetButtonPage as u8),
+        dst: dst_val,
+        src: src_val,
+    })
+}
+
 fn assemble_cmd(s: &str) -> String {
     MObjCmd::assemble(s).unwrap().to_string()
 }
 
+fn test_cmd(s: &str) {
+    assert_eq!(assemble_cmd(s), s);
+}
+
 #[test]
 fn test_assemble_operands() {
-    assert_eq!(assemble_cmd("goto 1"), "goto 1");
+    test_cmd("goto 1");
     assert_eq!(assemble_cmd("goto /* some comment */ 1"), "goto 1");
-    assert_eq!(assemble_cmd("goto r1"), "goto r1");
-    assert_eq!(assemble_cmd("goto PSR1"), "goto PSR1");
-    assert_eq!(assemble_cmd("goto PSR127"), "goto PSR127");
+    test_cmd("goto r1");
+    test_cmd("goto PSR1");
+    test_cmd("goto PSR127");
     assert_eq!(
         MObjCmd::assemble("goto PSR128").unwrap_err(),
         MObjParseError::User {
-            error: MObjParseErrorDetails::PsrOutOfRange
+            error: MObjParseErrorDetails {
+                range: 8..11,
+                error_type: MObjParseErrorType::PsrOutOfRange
+            }
         }
     );
-    assert_eq!(assemble_cmd("goto r4095"), "goto r4095");
+    test_cmd("goto r4095");
     assert_eq!(
         MObjCmd::assemble("goto r4096").unwrap_err(),
         MObjParseError::User {
-            error: MObjParseErrorDetails::GprOutOfRange
+            error: MObjParseErrorDetails {
+                range: 6..10,
+                error_type: MObjParseErrorType::GprOutOfRange
+            }
         }
+    );
+    assert_eq!(
+        MObjCmd::assemble("goto 999999999999").unwrap_err(),
+        MObjParseError::User {
+            error: MObjParseErrorDetails {
+                range: 5..17,
+                error_type: MObjParseErrorType::U32OutOfRange
+            }
+        }
+    );
+    assert_eq!(
+        MObjCmd::assemble("goto -1").unwrap_err(),
+        MObjParseError::InvalidToken { location: 5 }
     );
     assert_eq!(assemble_cmd("goto 0x10"), "goto 16");
     assert_eq!(assemble_cmd("goto r0x10"), "goto r16");
     assert_eq!(assemble_cmd("goto PSR0x10"), "goto PSR16");
-}
 
-fn test_cmd(s: &str) {
-    assert_eq!(assemble_cmd(s), s);
+    test_cmd("set_stream r1, r2, enabled, r3, r4");
+    test_cmd("set_stream 1, 2, enabled, r3, r4");
+    test_cmd("set_stream r1, r2, enabled, 3, 4");
+    test_cmd("set_stream 1, 2, enabled, 3, 4");
+    assert_eq!(
+        MObjCmd::assemble("set_stream r1, 2, enabled, r3, r4").unwrap_err(),
+        MObjParseError::User {
+            error: MObjParseErrorDetails {
+                range: 11..16,
+                error_type: MObjParseErrorType::SetStreamOperandTypeMismatch
+            }
+        }
+    );
+
+    test_cmd("set_button_page r1, r2");
+    test_cmd("set_button_page 1, r2");
+    test_cmd("set_button_page r1, 2");
+    test_cmd("set_button_page 1, 2");
+    test_cmd("set_button_page r1, r2, skip_out");
 }
 
 #[test]
@@ -627,10 +851,9 @@ fn test_assemble_cmds() {
     test_cmd("shl r1, r2");
     test_cmd("shr r1, r2");
 
-    // TODO: Parse SetStream and SetButtonPage
-    //test_cmd("set_stream r1, r2");
+    test_cmd("set_stream r1, r2, enabled, r3, r4");
     test_cmd("set_nv_timer r1, r2");
-    //test_cmd("set_button_page r1, r2");
+    test_cmd("set_button_page r1, r2");
     test_cmd("enable_button r1");
     test_cmd("disable_button r1");
     test_cmd("set_sec_stream r1, r2");
@@ -638,6 +861,6 @@ fn test_assemble_cmds() {
     test_cmd("still_on");
     test_cmd("still_off");
     test_cmd("set_output_mode r1");
-    //test_cmd("set_stream_ss r1, r2");
+    test_cmd("set_stream_ss r1, r2, enabled, r3, r4");
     test_cmd("bd_plus_msg r1, r2");
 }

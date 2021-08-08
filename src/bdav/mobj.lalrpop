@@ -3,17 +3,17 @@ use lalrpop_util::ParseError;
 use super::{
     MObjParseErrorDetails, MObjCmd, MObjGroup, MObjOperand, MObjInstruction, BranchSubGroup,
     SetSubGroup, GotoInstruction, JumpInstruction, PlayInstruction, CmpInstruction, SetInstruction,
-    SetSystemInstruction,
+    SetSystemInstruction, MObjParseErrorType, make_set_stream_cmd, make_set_button_page_cmd
 };
 
 grammar;
 
 match {
     ",",
-    "r",
-    "PSR",
-    r"0[xX][0-9a-fA-F]+" => HEXNUM,
+    r"(?i)r" => R,
+    r"(?i)psr" => PSR,
     r"[0-9]+" => NUM,
+    r"0[xX][0-9a-fA-F]+" => HEXNUM,
 
     r"(?i)nop" => NOP,
     r"(?i)break" => BREAK,
@@ -63,6 +63,11 @@ match {
     r"(?i)set_output_mode" => SET_OUTPUT_MODE,
     r"(?i)set_stream_ss" => SET_STREAM_SS,
     r"(?i)bd_plus_msg" => BD_PLUS_MSG,
+
+    r"(?i)none" => NONE,
+    r"(?i)enabled" => ENABLED,
+    r"(?i)disabled" => DISABLED,
+    r"(?i)skip_out" => SKIP_OUT,
 
     r"\s*" => { },
     r"//[^\n\r]*[\n\r]*" => { },
@@ -144,6 +149,40 @@ pub(crate) Cmd: MObjCmd = {
         dst: dst.into_val(),
         src: src.into_val(),
     },
+    SET_STREAM <l1:@L> <primary_audio:OptionalOperand>
+        "," <pg_text_st:OptionalOperand> <r1:@R>
+        "," <pg_text_st_enabled:EnabledDisabled>
+        "," <l2:@L> <ig:OptionalOperand>
+        "," <angle:OptionalOperand> <r2:@R> =>?
+            make_set_stream_cmd(
+                SetSystemInstruction::SetStream,
+                l1..r1,
+                primary_audio,
+                pg_text_st,
+                pg_text_st_enabled,
+                l2..r2,
+                ig,
+                angle
+            ),
+    SET_STREAM_SS <l1:@L> <primary_audio:OptionalOperand>
+        "," <pg_text_st:OptionalOperand> <r1:@R>
+        "," <pg_text_st_enabled:EnabledDisabled>
+        "," <l2:@L> <ig:OptionalOperand>
+        "," <angle:OptionalOperand> <r2:@R> =>?
+            make_set_stream_cmd(
+                SetSystemInstruction::SetStreamSs,
+                l1..r1,
+                primary_audio,
+                pg_text_st,
+                pg_text_st_enabled,
+                l2..r2,
+                ig,
+                angle
+            ),
+    SET_BUTTON_PAGE <button:OptionalOperand> "," <page:OptionalOperand> =>?
+        make_set_button_page_cmd(button, page, false),
+    SET_BUTTON_PAGE <button:OptionalOperand> "," <page:OptionalOperand> "," SKIP_OUT =>?
+        make_set_button_page_cmd(button, page, true),
 }
 
 ZeroOpBranchMnemonic: (u8, u8) = {
@@ -207,75 +246,57 @@ TwoOpSetMnemonic: (u8, u8) = {
     BCLR => (SetSubGroup::Set as u8, SetInstruction::Bitclr as u8),
     SHL => (SetSubGroup::Set as u8, SetInstruction::Shl as u8),
     SHR => (SetSubGroup::Set as u8, SetInstruction::Shr as u8),
-    SET_STREAM => (SetSubGroup::SetSystem as u8, SetSystemInstruction::SetStream as u8),
     SET_NV_TIMER => (SetSubGroup::SetSystem as u8, SetSystemInstruction::SetNvTimer as u8),
-    SET_BUTTON_PAGE => (SetSubGroup::SetSystem as u8, SetSystemInstruction::SetButtonPage as u8),
     SET_SEC_STREAM => (SetSubGroup::SetSystem as u8, SetSystemInstruction::SetSecStream as u8),
-    SET_STREAM_SS => (SetSubGroup::SetSystem as u8, SetSystemInstruction::SetStreamSs as u8),
     BD_PLUS_MSG => (SetSubGroup::SetSystem as u8, SetSystemInstruction::BdPlusMsg as u8),
 }
 
 Operand: MObjOperand = {
-    "r" <n:GprNum> => MObjOperand::Gpr(n),
-    "PSR" <n:PsrNum> => MObjOperand::Psr(n),
+    R <n:GprNum> => MObjOperand::Gpr(n),
+    PSR <n:PsrNum> => MObjOperand::Psr(n),
     <n:Num> => MObjOperand::Imm(n),
 }
 
+OptionalOperand: Option<MObjOperand> = {
+    R <n:GprNum> => Some(MObjOperand::Gpr(n)),
+    <n:Num> => Some(MObjOperand::Imm(n)),
+    NONE => None,
+}
+
+EnabledDisabled: bool = {
+    ENABLED => true,
+    DISABLED => false,
+}
+
 GprNum: u32 = {
-    <v:HEXNUM> =>? u32::from_str_radix(&v[2..], 16)
-        .ok()
-        .and_then(|n| {
-            if (0..=0xfff).contains(&n) {
-                Some(n)
-            } else {
-                None
-            }
-        })
-        .ok_or_else(|| ParseError::User {
-            error: MObjParseErrorDetails::GprOutOfRange,
-        }),
-    <v:NUM> =>? u32::from_str_radix(v, 10)
-        .ok()
-        .and_then(|n| {
-            if (0..=0xfff).contains(&n) {
-                Some(n)
-            } else {
-                None
-            }
-        })
-        .ok_or_else(|| ParseError::User {
-            error: MObjParseErrorDetails::GprOutOfRange,
-        }),
+    <l:@L> <v:Num> <r:@R> =>?
+        if (0..=0xfff).contains(&v) {
+            Ok(v)
+        } else {
+            Err(ParseError::User {
+                error: MObjParseErrorDetails { range: l..r, error_type: MObjParseErrorType::GprOutOfRange }
+            })
+        },
 }
 
 PsrNum: u32 = {
-    <v:HEXNUM> =>? u32::from_str_radix(&v[2..], 16)
-        .ok()
-        .and_then(|n| {
-            if (0..=0x7f).contains(&n) {
-                Some(n)
-            } else {
-                None
-            }
-        })
-        .ok_or_else(|| ParseError::User {
-            error: MObjParseErrorDetails::PsrOutOfRange,
-        }),
-    <v:NUM> =>? u32::from_str_radix(v, 10)
-        .ok()
-        .and_then(|n| {
-            if (0..=0x7f).contains(&n) {
-                Some(n)
-            } else {
-                None
-            }
-        })
-        .ok_or_else(|| ParseError::User {
-            error: MObjParseErrorDetails::PsrOutOfRange,
-        }),
+    <l:@L> <v:Num> <r:@R> =>?
+        if (0..=0x7f).contains(&v) {
+            Ok(v)
+        } else {
+            Err(ParseError::User {
+                error: MObjParseErrorDetails { range: l..r, error_type: MObjParseErrorType::PsrOutOfRange }
+            })
+        },
 }
 
 Num: u32 = {
-    <v:HEXNUM> => u32::from_str_radix(&v[2..], 16).unwrap(),
-    <v:NUM> => u32::from_str_radix(v, 10).unwrap(),
+    <l:@L> <v:HEXNUM> <r:@R> =>? u32::from_str_radix(&v[2..], 16)
+        .map_err(|_| ParseError::User {
+            error: MObjParseErrorDetails { range: l..r, error_type: MObjParseErrorType::U32OutOfRange }
+        }),
+    <l:@L> <v:NUM> <r:@R> =>? u32::from_str_radix(v, 10)
+        .map_err(|_| ParseError::User {
+            error: MObjParseErrorDetails { range: l..r, error_type: MObjParseErrorType::U32OutOfRange }
+        }),
 }
