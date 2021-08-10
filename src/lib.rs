@@ -74,6 +74,9 @@ pub trait AppDetails: Default {
     /// The extension error type exposed via [`ErrorDetails::AppError`].
     type AppErrorDetails: Debug;
 
+    /// Parsing state storage that application may use across payload units.
+    type AppParserStorage;
+
     /// Application-defined function to map a PES unit-start packet's `pid` into a new
     /// [`PesUnitObject`].
     ///
@@ -88,6 +91,8 @@ pub struct DefaultAppDetails;
 
 impl AppDetails for DefaultAppDetails {
     type AppErrorDetails = ();
+
+    type AppParserStorage = ();
 
     fn new_pes_unit_data(pid: u16, unit_length: usize) -> Option<Box<dyn PesUnitObject<Self>>> {
         None
@@ -154,7 +159,7 @@ pub struct AdaptationFieldHeader {
 
 /// Expands to [`format_args`] for a 90kHz timestamp of any integer type.
 ///
-/// Format is <hours>:<minutes>:<seconds>:<90kHz-ticks>
+/// Format is `<hours>:<minutes>:<seconds>:<90kHz-ticks>`
 ///
 /// # Example
 ///
@@ -263,6 +268,7 @@ pub struct Packet<'a, D> {
 pub struct MpegTsParser<D: AppDetails = DefaultAppDetails> {
     pending_payload_units: HashMap<u16, PayloadUnitBuilder<D>>,
     known_pmt_pids: HashSet<u16>,
+    app_parser_storage: D::AppParserStorage,
 }
 
 fn is_pes(b: &[u8; 3]) -> bool {

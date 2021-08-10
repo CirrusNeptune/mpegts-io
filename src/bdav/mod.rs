@@ -3,15 +3,50 @@
 //! Supports parsing program graphics (PG) and interactive graphics (IG) data.
 
 use super::{
-    read_bitfield, AppDetails, MpegTsParser, Packet, Payload, PesUnitObject, Result, SliceReader,
+    read_bitfield, AppDetails, Error, MpegTsParser, Packet, Payload, PesUnitObject, Result,
+    SliceReader,
 };
+use log::warn;
 use modular_bitfield_msb::prelude::*;
+use num_traits::FromPrimitive;
 
 pub mod mobj;
-use mobj::MObjCmd;
+use mobj::{MObjCmd, MObjCmdErrorDetails};
 
 pub mod pg;
-use pg::PgSegmentData;
+use crate::ErrorDetails;
+use pg::{FrameRate, PgCompositionDescriptor, PgCompositionUnitState, PgSegmentData};
+use std::collections::HashMap;
+
+fn from_primitive_map_err<
+    T: num_traits::FromPrimitive,
+    U: Clone + Into<u64>,
+    E,
+    F: FnOnce(U) -> E,
+>(
+    val: U,
+    err_fn: F,
+) -> std::result::Result<T, E> {
+    match FromPrimitive::from_u64(val.clone().into()) {
+        Some(v) => Ok(v),
+        None => Err(err_fn(val)),
+    }
+}
+
+fn from_primitive_read_u8<
+    D: BdavAppDetails,
+    T: num_traits::FromPrimitive,
+    F: FnOnce(u8) -> BdavErrorDetails,
+>(
+    reader: &mut SliceReader<D>,
+    err_fn: F,
+) -> Result<T, D> {
+    let val = reader.read_u8()?;
+    match FromPrimitive::from_u8(val) {
+        Some(v) => Ok(v),
+        None => Err(reader.make_error(ErrorDetails::AppError(err_fn(val)))),
+    }
+}
 
 /// BDAV-specific header prepended to MPEG-TS packets
 #[bitfield]
@@ -37,10 +72,28 @@ pub struct BdavPacket<'a, D> {
 pub enum BdavErrorDetails {
     /// Encountered an unknown type for [`PgSegmentData`].
     UnknownPgSegmentType(u8),
+    /// Encountered an unknown [`FrameRate`].
+    UnknownFrameRate(u8),
+    /// Encountered an unknown [`PgCompositionUnitState`].
+    UnknownPgCompositionUnitState(u8),
+    /// Encountered a bad [`MObjCmd`].
+    BadMObjCommand(MObjCmdErrorDetails),
+    /// Encountered an non-started PgsObject fragment.
+    NonStartedPgsObject,
+}
+
+/// Cross-payload state for BDAV parsing.
+#[derive(Default)]
+pub struct BdavParserStorage {
+    pending_ig_segments: HashMap<PgCompositionDescriptor, Vec<u8>>,
+    pending_obj_segments: HashMap<(u16, u8), Vec<u8>>,
 }
 
 /// Extension trait for parsing BDAV-specific payload data.
-pub trait BdavAppDetails: AppDetails<AppErrorDetails = BdavErrorDetails> {}
+pub trait BdavAppDetails:
+    AppDetails<AppErrorDetails = BdavErrorDetails, AppParserStorage = BdavParserStorage>
+{
+}
 
 /// [`BdavAppDetails`] implementation for [`BdavParser::default`].
 ///
@@ -50,6 +103,8 @@ pub struct DefaultBdavAppDetails;
 
 impl AppDetails for DefaultBdavAppDetails {
     type AppErrorDetails = BdavErrorDetails;
+
+    type AppParserStorage = BdavParserStorage;
 
     fn new_pes_unit_data(pid: u16, unit_length: usize) -> Option<Box<dyn PesUnitObject<Self>>> {
         match pid {

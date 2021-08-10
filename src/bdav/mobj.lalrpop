@@ -82,7 +82,7 @@ pub(crate) Cmd: MObjCmd = {
     <m:ZeroOpBranchMnemonic> => MObjCmd {
         inst: MObjInstruction::new()
             .with_op_cnt(0)
-            .with_grp(MObjGroup::Branch)
+            .with_grp(MObjGroup::Branch as u8)
             .with_sub_grp(m.0)
             .with_branch_opt(m.1),
         dst: 0,
@@ -91,7 +91,7 @@ pub(crate) Cmd: MObjCmd = {
     <m:OneOpBranchMnemonic> <dst:Operand> => MObjCmd {
         inst: MObjInstruction::new()
             .with_op_cnt(1)
-            .with_grp(MObjGroup::Branch)
+            .with_grp(MObjGroup::Branch as u8)
             .with_sub_grp(m.0)
             .with_imm_op1(dst.is_imm())
             .with_branch_opt(m.1),
@@ -101,7 +101,7 @@ pub(crate) Cmd: MObjCmd = {
     <m:TwoOpBranchMnemonic> <dst:Operand> "," <src:Operand> => MObjCmd {
         inst: MObjInstruction::new()
             .with_op_cnt(2)
-            .with_grp(MObjGroup::Branch)
+            .with_grp(MObjGroup::Branch as u8)
             .with_sub_grp(m.0)
             .with_imm_op1(dst.is_imm())
             .with_imm_op2(src.is_imm())
@@ -112,7 +112,7 @@ pub(crate) Cmd: MObjCmd = {
     <m:TwoOpCmpMnemonic> <dst:Operand> "," <src:Operand> => MObjCmd {
         inst: MObjInstruction::new()
             .with_op_cnt(2)
-            .with_grp(MObjGroup::Cmp)
+            .with_grp(MObjGroup::Cmp as u8)
             .with_imm_op1(dst.is_imm())
             .with_imm_op2(src.is_imm())
             .with_cmp_opt(m),
@@ -122,7 +122,7 @@ pub(crate) Cmd: MObjCmd = {
     <m:ZeroOpSetMnemonic> => MObjCmd {
         inst: MObjInstruction::new()
             .with_op_cnt(0)
-            .with_grp(MObjGroup::Set)
+            .with_grp(MObjGroup::Set as u8)
             .with_sub_grp(m.0)
             .with_set_opt(m.1),
         dst: 0,
@@ -131,7 +131,7 @@ pub(crate) Cmd: MObjCmd = {
     <m:OneOpSetMnemonic> <dst:Operand> => MObjCmd {
         inst: MObjInstruction::new()
             .with_op_cnt(1)
-            .with_grp(MObjGroup::Set)
+            .with_grp(MObjGroup::Set as u8)
             .with_sub_grp(m.0)
             .with_imm_op1(dst.is_imm())
             .with_set_opt(m.1),
@@ -141,7 +141,7 @@ pub(crate) Cmd: MObjCmd = {
     <m:TwoOpSetMnemonic> <dst:Operand> "," <src:Operand> => MObjCmd {
         inst: MObjInstruction::new()
             .with_op_cnt(2)
-            .with_grp(MObjGroup::Set)
+            .with_grp(MObjGroup::Set as u8)
             .with_sub_grp(m.0)
             .with_imm_op1(dst.is_imm())
             .with_imm_op2(src.is_imm())

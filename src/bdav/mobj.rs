@@ -1,11 +1,13 @@
 //! Module for assembling and disassembling MObj bytecode found in MovieObject.bdmv and IG button
 //! navigation commands.
 
-use super::{read_bitfield, AppDetails, Result, SliceReader};
+use super::{
+    from_primitive_map_err, read_bitfield, BdavAppDetails, BdavErrorDetails, Result, SliceReader,
+};
+use crate::ErrorDetails;
 use lalrpop_util::{lalrpop_mod, lexer::Token, ParseError};
 use modular_bitfield_msb::prelude::*;
 use num_derive::FromPrimitive;
-use num_traits::FromPrimitive;
 use std::fmt::{Debug, Display, Formatter};
 use std::io::Write;
 use std::ops::Range;
@@ -114,6 +116,29 @@ pub fn write_parse_error(
     Ok(())
 }
 
+/// MObj errors from the MObj command decoder.
+#[derive(Debug)]
+pub enum MObjCmdErrorDetails {
+    /// Encountered an unknown [`MObjGroup`].
+    UnknownMObjGroup(u8),
+    /// Encountered an unknown [`BranchSubGroup`].
+    UnknownBranchSubGroup(u8),
+    /// Encountered an unknown [`GotoInstruction`].
+    UnknownGotoInstruction(u8),
+    /// Encountered an unknown [`JumpInstruction`].
+    UnknownJumpInstruction(u8),
+    /// Encountered an unknown [`PlayInstruction`].
+    UnknownPlayInstruction(u8),
+    /// Encountered an unknown [`CmpInstruction`].
+    UnknownCmpInstruction(u8),
+    /// Encountered an unknown [`SetSubGroup`].
+    UnknownSetSubGroup(u8),
+    /// Encountered an unknown [`SetInstruction`].
+    UnknownSetInstruction(u8),
+    /// Encountered an unknown [`SetSystemInstruction`].
+    UnknownSetSystemInstruction(u8),
+}
+
 macro_rules! instruction_enum {
     // Exit rule.
     (
@@ -121,6 +146,7 @@ macro_rules! instruction_enum {
         ($(,)*) -> ($($(#[$vattr:meta])* $var:ident($str:expr) $(= $num:expr)*,)*)
     ) => {
         $(#[$attr])*
+        #[repr(u8)]
         #[derive(Debug, Copy, Clone, PartialEq, FromPrimitive)]
         pub enum $name {
             $($(#[$vattr])* $var $(= $num)*,)*
@@ -163,8 +189,7 @@ macro_rules! instruction_enum {
 
 /// Top-level MObj instruction group.
 #[repr(u8)]
-#[derive(Debug, BitfieldSpecifier)]
-#[bits = 2]
+#[derive(Debug, Copy, Clone, PartialEq, FromPrimitive)]
 pub enum MObjGroup {
     /// Selects [`BranchSubGroup`].
     Branch,
@@ -174,7 +199,14 @@ pub enum MObjGroup {
     Set,
 }
 
+impl Default for MObjGroup {
+    fn default() -> Self {
+        MObjGroup::Branch
+    }
+}
+
 /// Branch instruction group.
+#[repr(u8)]
 #[derive(Debug, Copy, Clone, PartialEq, FromPrimitive)]
 pub enum BranchSubGroup {
     /// Selects [`GotoInstruction`].
@@ -183,6 +215,12 @@ pub enum BranchSubGroup {
     Jump,
     /// Selects [`PlayInstruction`].
     Play,
+}
+
+impl Default for BranchSubGroup {
+    fn default() -> Self {
+        BranchSubGroup::Goto
+    }
 }
 
 instruction_enum! {
@@ -252,12 +290,19 @@ instruction_enum! {
 }
 
 /// Set instruction group.
+#[repr(u8)]
 #[derive(Debug, Copy, Clone, PartialEq, FromPrimitive)]
 pub enum SetSubGroup {
     /// Selects [`SetInstruction`].
     Set,
     /// Selects [`SetSystemInstruction`].
     SetSystem,
+}
+
+impl Default for SetSubGroup {
+    fn default() -> Self {
+        SetSubGroup::Set
+    }
 }
 
 instruction_enum! {
@@ -331,7 +376,7 @@ instruction_enum! {
 #[derive(Debug)]
 pub struct MObjInstruction {
     pub op_cnt: B3,
-    pub grp: MObjGroup,
+    pub grp: B2,
     pub sub_grp: B3,
     pub imm_op1: bool,
     pub imm_op2: bool,
@@ -358,11 +403,15 @@ pub struct MObjCmd {
 
 impl MObjCmd {
     /// Parses 12 bytes of command bytecode.
-    pub fn parse<D: AppDetails>(reader: &mut SliceReader<D>) -> Result<Self, D> {
+    pub fn parse<D: BdavAppDetails>(reader: &mut SliceReader<D>) -> Result<Self, D> {
         let inst = read_bitfield!(reader, MObjInstruction);
         let dst = reader.read_be_u32()?;
         let src = reader.read_be_u32()?;
-        Ok(Self { inst, dst, src })
+        let new_cmd = Self { inst, dst, src };
+        new_cmd.validate().map_err(|e| {
+            reader.make_error(ErrorDetails::AppError(BdavErrorDetails::BadMObjCommand(e)))
+        })?;
+        Ok(new_cmd)
     }
 
     /// Assembles a command from an assembly string.
@@ -371,36 +420,73 @@ impl MObjCmd {
     }
 
     /// Visit instruction with command category resolved.
-    pub fn visit<V: MObjCmdVisitor<R>, R>(&self, visitor: V) -> R {
-        match self.inst.grp() {
-            MObjGroup::Branch => match FromPrimitive::from_u8(self.inst.sub_grp()).unwrap() {
-                BranchSubGroup::Goto => {
-                    visitor.visit_goto(FromPrimitive::from_u8(self.inst.branch_opt()).unwrap())
-                }
-                BranchSubGroup::Jump => {
-                    visitor.visit_jump(FromPrimitive::from_u8(self.inst.branch_opt()).unwrap())
-                }
-                BranchSubGroup::Play => {
-                    visitor.visit_play(FromPrimitive::from_u8(self.inst.branch_opt()).unwrap())
-                }
+    pub fn visit<V: MObjCmdVisitor<R>, R>(
+        &self,
+        visitor: V,
+    ) -> std::result::Result<R, MObjCmdErrorDetails> {
+        Ok(
+            match from_primitive_map_err(self.inst.grp(), |v| {
+                MObjCmdErrorDetails::UnknownMObjGroup(v)
+            })? {
+                MObjGroup::Branch => match from_primitive_map_err(self.inst.sub_grp(), |v| {
+                    MObjCmdErrorDetails::UnknownBranchSubGroup(v)
+                })? {
+                    BranchSubGroup::Goto => visitor
+                        .visit_goto(from_primitive_map_err(self.inst.branch_opt(), |v| {
+                            MObjCmdErrorDetails::UnknownGotoInstruction(v)
+                        })?),
+                    BranchSubGroup::Jump => visitor
+                        .visit_jump(from_primitive_map_err(self.inst.branch_opt(), |v| {
+                            MObjCmdErrorDetails::UnknownJumpInstruction(v)
+                        })?),
+                    BranchSubGroup::Play => visitor
+                        .visit_play(from_primitive_map_err(self.inst.branch_opt(), |v| {
+                            MObjCmdErrorDetails::UnknownPlayInstruction(v)
+                        })?),
+                },
+                MObjGroup::Cmp => visitor
+                    .visit_cmp(from_primitive_map_err(self.inst.cmp_opt(), |v| {
+                        MObjCmdErrorDetails::UnknownCmpInstruction(v)
+                    })?),
+                MObjGroup::Set => match from_primitive_map_err(self.inst.sub_grp(), |v| {
+                    MObjCmdErrorDetails::UnknownSetSubGroup(v)
+                })? {
+                    SetSubGroup::Set => visitor
+                        .visit_set(from_primitive_map_err(self.inst.set_opt(), |v| {
+                            MObjCmdErrorDetails::UnknownSetInstruction(v)
+                        })?),
+                    SetSubGroup::SetSystem => visitor
+                        .visit_set_system(from_primitive_map_err(self.inst.set_opt(), |v| {
+                            MObjCmdErrorDetails::UnknownSetSystemInstruction(v)
+                        })?),
+                },
             },
-            MObjGroup::Cmp => {
-                visitor.visit_cmp(FromPrimitive::from_u8(self.inst.cmp_opt()).unwrap())
-            }
-            MObjGroup::Set => match FromPrimitive::from_u8(self.inst.sub_grp()).unwrap() {
-                SetSubGroup::Set => {
-                    visitor.visit_set(FromPrimitive::from_u8(self.inst.set_opt()).unwrap())
-                }
-                SetSubGroup::SetSystem => {
-                    visitor.visit_set_system(FromPrimitive::from_u8(self.inst.set_opt()).unwrap())
-                }
-            },
-        }
+        )
+    }
+
+    /// Ensures a valid command hierarchy is present.
+    pub fn validate(&self) -> std::result::Result<(), MObjCmdErrorDetails> {
+        self.visit(CmdValidate)
     }
 
     /// Gets string of command mnemonic.
     pub fn mnemonic(&self) -> &'static str {
-        self.visit(GetCmdMnemonic)
+        match self.visit(GetCmdMnemonic) {
+            Ok(s) => s,
+            Err(ed) => match ed {
+                MObjCmdErrorDetails::UnknownMObjGroup(u8) => "<BAD MOBJ GROUP>",
+                MObjCmdErrorDetails::UnknownBranchSubGroup(u8) => "<BAD BRANCH SUBGROUP>",
+                MObjCmdErrorDetails::UnknownGotoInstruction(u8) => "<BAD GOTO INSTRUCTION>",
+                MObjCmdErrorDetails::UnknownJumpInstruction(u8) => "<BAD JUMP INSTRUCTION>",
+                MObjCmdErrorDetails::UnknownPlayInstruction(u8) => "<BAD PLAY INSTRUCTION>",
+                MObjCmdErrorDetails::UnknownCmpInstruction(u8) => "<BAD CMP INSTRUCTION>",
+                MObjCmdErrorDetails::UnknownSetSubGroup(u8) => "<BAD SET SUBGROUP>",
+                MObjCmdErrorDetails::UnknownSetInstruction(u8) => "<BAD SET INSTRUCTION>",
+                MObjCmdErrorDetails::UnknownSetSystemInstruction(u8) => {
+                    "<BAD SETSYSTEM INSTRUCTION>"
+                }
+            },
+        }
     }
 
     fn make_operand(v: u32, is_imm: bool) -> MObjOperand {
@@ -426,11 +512,14 @@ macro_rules! format_cmd {
     ($fmt_type:ident) => {
         impl $fmt_type for MObjCmd {
             fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-                if let MObjGroup::Set = self.inst.grp() {
-                    let sub_grp: SetSubGroup = FromPrimitive::from_u8(self.inst.sub_grp()).unwrap();
+                if let MObjGroup::Set =
+                    from_primitive_map_err(self.inst.grp(), |_| std::fmt::Error)?
+                {
+                    let sub_grp: SetSubGroup =
+                        from_primitive_map_err(self.inst.sub_grp(), |_| std::fmt::Error)?;
                     if sub_grp == SetSubGroup::SetSystem {
                         let inst: SetSystemInstruction =
-                            FromPrimitive::from_u8(self.inst.set_opt()).unwrap();
+                            from_primitive_map_err(self.inst.set_opt(), |_| std::fmt::Error)?;
                         match inst {
                             // TODO: Operands of SetStreamSs not known
                             SetSystemInstruction::SetStream | SetSystemInstruction::SetStreamSs => {
@@ -557,29 +646,35 @@ pub trait MObjCmdVisitor<R> {
     fn visit_set_system(self, inst: SetSystemInstruction) -> R;
 }
 
+struct CmdValidate;
+
+impl MObjCmdVisitor<()> for CmdValidate {
+    fn visit_goto(self, inst: GotoInstruction) {}
+    fn visit_jump(self, inst: JumpInstruction) {}
+    fn visit_play(self, inst: PlayInstruction) {}
+    fn visit_cmp(self, inst: CmpInstruction) {}
+    fn visit_set(self, inst: SetInstruction) {}
+    fn visit_set_system(self, inst: SetSystemInstruction) {}
+}
+
 struct GetCmdMnemonic;
 
 impl MObjCmdVisitor<&'static str> for GetCmdMnemonic {
     fn visit_goto(self, inst: GotoInstruction) -> &'static str {
         inst.mnemonic()
     }
-
     fn visit_jump(self, inst: JumpInstruction) -> &'static str {
         inst.mnemonic()
     }
-
     fn visit_play(self, inst: PlayInstruction) -> &'static str {
         inst.mnemonic()
     }
-
     fn visit_cmp(self, inst: CmpInstruction) -> &'static str {
         inst.mnemonic()
     }
-
     fn visit_set(self, inst: SetInstruction) -> &'static str {
         inst.mnemonic()
     }
-
     fn visit_set_system(self, inst: SetSystemInstruction) -> &'static str {
         inst.mnemonic()
     }
@@ -774,7 +869,7 @@ pub(crate) fn make_set_stream_cmd<'a>(
     Ok(MObjCmd {
         inst: MObjInstruction::new()
             .with_op_cnt(2)
-            .with_grp(MObjGroup::Set)
+            .with_grp(MObjGroup::Set as u8)
             .with_sub_grp(SetSubGroup::SetSystem as u8)
             .with_imm_op1(is_optional_operand_imm(&primary_audio))
             .with_imm_op2(is_optional_operand_imm(&ig))
@@ -803,7 +898,7 @@ pub(crate) fn make_set_button_page_cmd<'a>(
     Ok(MObjCmd {
         inst: MObjInstruction::new()
             .with_op_cnt(2)
-            .with_grp(MObjGroup::Set)
+            .with_grp(MObjGroup::Set as u8)
             .with_sub_grp(SetSubGroup::SetSystem as u8)
             .with_imm_op1(is_optional_operand_imm(&button))
             .with_imm_op2(is_optional_operand_imm(&page))

@@ -2,14 +2,14 @@
 //! in Blu-Ray subtitles and menus.
 
 use super::{
-    mobj::MObjCmd, read_bitfield, AppDetails, BdavAppDetails, BdavErrorDetails, MpegTsParser,
-    PesUnitObject, SliceReader,
+    from_primitive_map_err, from_primitive_read_u8, mobj::MObjCmd, read_bitfield, BdavAppDetails,
+    BdavErrorDetails, BdavParserStorage, MpegTsParser, PesUnitObject, SliceReader,
 };
 use crate::{ErrorDetails, Result};
 use log::warn;
 use modular_bitfield_msb::prelude::*;
 use num_derive::FromPrimitive;
-use num_traits::FromPrimitive;
+use std::fmt::{Debug, Formatter};
 
 /// A YCbCrA palette entry.
 #[derive(Debug, Default, Copy, Clone)]
@@ -24,7 +24,7 @@ pub struct PgsPaletteEntry {
     pub t: u8,
 }
 
-/// A palette object that is referenced by a [`PgsObject`].
+/// A palette object that defines colors for [`PgsObject`] objects.
 #[derive(Debug)]
 pub struct PgsPalette {
     /// Palette ID
@@ -36,7 +36,10 @@ pub struct PgsPalette {
 }
 
 impl PgsPalette {
-    fn parse<D: AppDetails>(reader: &mut SliceReader<D>) -> Result<Self, D> {
+    fn parse<D: BdavAppDetails>(
+        reader: &mut SliceReader<D>,
+        storage: &mut BdavParserStorage,
+    ) -> Result<Self, D> {
         let id = reader.read_u8()?;
         let version = reader.read_u8()?;
         let mut out = PgsPalette {
@@ -57,13 +60,126 @@ impl PgsPalette {
     }
 }
 
+/// Final parsed data of [`PgsObject`].
+pub struct PgsObjectData {
+    /// Object width.
+    pub width: u16,
+    /// Object height.
+    pub height: u16,
+    /// Object RLE data.
+    pub data: Vec<u8>,
+}
+
+impl Debug for PgsObjectData {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PgsObjectData")
+            .field("width", &self.width)
+            .field("height", &self.height)
+            .field("data.len()", &self.data.len())
+            .finish()
+    }
+}
+
+impl PgsObjectData {
+    fn parse<D: BdavAppDetails>(reader: &mut SliceReader<D>) -> Result<Self, D> {
+        let width = reader.read_be_u16()?;
+        let height = reader.read_be_u16()?;
+
+        let mut data = Vec::new();
+        data.extend_from_slice(reader.read_to_end()?);
+
+        Ok(Self {
+            width,
+            height,
+            data,
+        })
+    }
+}
+
 /// An indexed-color image used within a graphics composition.
 #[derive(Debug)]
-pub struct PgsObject {}
+pub struct PgsObject {
+    /// Object ID
+    pub id: u16,
+    /// Format version
+    pub version: u8,
+    /// Flags that indicate the position of a segment split across multiple units.
+    pub sequence_descriptor: PgSequenceDescriptor,
+    /// Parsed data after segment fragments are reassembled.
+    pub data: Option<PgsObjectData>,
+}
 
 impl PgsObject {
-    fn parse<D: AppDetails>(reader: &mut SliceReader<D>) -> Result<Self, D> {
-        Ok(Self {})
+    fn parse<D: BdavAppDetails>(
+        reader: &mut SliceReader<D>,
+        storage: &mut BdavParserStorage,
+    ) -> Result<Self, D> {
+        let id = reader.read_be_u16()?;
+        let version = reader.read_u8()?;
+        let sequence_descriptor = PgSequenceDescriptor::parse(reader)?;
+        let key = (id, version);
+
+        if sequence_descriptor.first_in_seq && sequence_descriptor.last_in_seq {
+            // Single-fragment case; immediately parse data.
+            let length = reader.read_be_u24()? as usize;
+            assert_eq!(reader.remaining_len(), length);
+            Ok(Self {
+                id,
+                version,
+                sequence_descriptor,
+                data: Some(PgsObjectData::parse(reader)?),
+            })
+        } else if sequence_descriptor.first_in_seq {
+            // First fragment of many.
+            if storage.pending_obj_segments.contains_key(&key) {
+                warn!("Discarding pending PgsObject({}, {})", id, version);
+            }
+            let length = reader.read_be_u24()?;
+            let mut data = Vec::with_capacity(length as usize);
+            assert!(reader.remaining_len() <= data.capacity());
+            data.extend_from_slice(reader.read_to_end()?);
+            storage.pending_obj_segments.insert(key, data);
+            Ok(Self {
+                id,
+                version,
+                sequence_descriptor,
+                data: None,
+            })
+        } else if !sequence_descriptor.first_in_seq && !sequence_descriptor.last_in_seq {
+            // Intermediate fragment of many.
+            match storage.pending_obj_segments.get_mut(&key) {
+                Some(mut data) => {
+                    assert!(data.len() + reader.remaining_len() <= data.capacity());
+                    data.extend_from_slice(reader.read_to_end()?);
+                    Ok(Self {
+                        id,
+                        version,
+                        sequence_descriptor,
+                        data: None,
+                    })
+                }
+                None => Err(reader.make_error(ErrorDetails::AppError(
+                    BdavErrorDetails::NonStartedPgsObject,
+                ))),
+            }
+        } else {
+            // Final fragment of many.
+            match storage.pending_obj_segments.remove(&key) {
+                Some(mut data) => {
+                    assert_eq!(data.len() + reader.remaining_len(), data.capacity());
+                    data.extend_from_slice(reader.read_to_end()?);
+                    Ok(Self {
+                        id,
+                        version,
+                        sequence_descriptor,
+                        data: Some(PgsObjectData::parse(&mut SliceReader::new(&data))?),
+                    })
+                }
+                None => Err(reader.make_error(ErrorDetails::AppError(
+                    BdavErrorDetails::NonStartedPgsObject,
+                ))),
+            }
+        }
     }
 }
 
@@ -72,7 +188,10 @@ impl PgsObject {
 pub struct PgsPgComposition {}
 
 impl PgsPgComposition {
-    fn parse<D: AppDetails>(reader: &mut SliceReader<D>) -> Result<Self, D> {
+    fn parse<D: BdavAppDetails>(
+        reader: &mut SliceReader<D>,
+        storage: &mut BdavParserStorage,
+    ) -> Result<Self, D> {
         Ok(Self {})
     }
 }
@@ -82,7 +201,10 @@ impl PgsPgComposition {
 pub struct PgsWindow {}
 
 impl PgsWindow {
-    fn parse<D: AppDetails>(reader: &mut SliceReader<D>) -> Result<Self, D> {
+    fn parse<D: BdavAppDetails>(
+        reader: &mut SliceReader<D>,
+        storage: &mut BdavParserStorage,
+    ) -> Result<Self, D> {
         Ok(Self {})
     }
 }
@@ -106,12 +228,6 @@ pub enum FrameRate {
     Drop60,
 }
 
-impl Default for FrameRate {
-    fn default() -> Self {
-        FrameRate::Invalid
-    }
-}
-
 /// Video viewport information for the graphics composition.
 #[derive(Debug)]
 pub struct PgVideoDescriptor {
@@ -124,10 +240,14 @@ pub struct PgVideoDescriptor {
 }
 
 impl PgVideoDescriptor {
-    fn parse<D: AppDetails>(reader: &mut SliceReader<D>) -> Result<Self, D> {
+    fn parse<D: BdavAppDetails>(reader: &mut SliceReader<D>) -> Result<Self, D> {
         let video_width = reader.read_be_u16()?;
         let video_height = reader.read_be_u16()?;
-        let frame_rate = FromPrimitive::from_u8(reader.read_u8()? >> 4).unwrap_or_default();
+        let frame_rate = from_primitive_map_err(reader.read_u8()? >> 4, |v| {
+            reader.make_error(ErrorDetails::AppError(BdavErrorDetails::UnknownFrameRate(
+                v,
+            )))
+        })?;
         Ok(Self {
             video_width,
             video_height,
@@ -145,13 +265,7 @@ pub enum PgCompositionUnitState {
     /// First palette of a new set (clearing out the old one).
     NewPalette,
     /// Entirely new composition that clears all loaded composition objects.
-    NewComposition,
-}
-
-impl Default for PgCompositionUnitState {
-    fn default() -> Self {
-        PgCompositionUnitState::Incremental
-    }
+    EpochStart,
 }
 
 /// Information about the sequence of PES units that make up a composition.
@@ -164,17 +278,18 @@ pub struct PgCompositionDescriptor {
 }
 
 impl PgCompositionDescriptor {
-    fn parse<D: AppDetails>(reader: &mut SliceReader<D>) -> Result<Self, D> {
+    fn parse<D: BdavAppDetails>(reader: &mut SliceReader<D>) -> Result<Self, D> {
         let number = reader.read_be_u16()?;
-        let state = reader.read_u8()?;
-        Ok(Self {
-            number,
-            state: FromPrimitive::from_u8(state).unwrap_or_default(),
-        })
+        let state = from_primitive_map_err(reader.read_u8()? >> 6, |v| {
+            reader.make_error(ErrorDetails::AppError(
+                BdavErrorDetails::UnknownPgCompositionUnitState(v),
+            ))
+        })?;
+        Ok(Self { number, state })
     }
 }
 
-/// Flags that indicate the position of a composition in sequence.
+/// Flags that indicate the position of a segment split across multiple units.
 #[derive(Debug)]
 pub struct PgSequenceDescriptor {
     /// Is first in sequence.
@@ -184,7 +299,7 @@ pub struct PgSequenceDescriptor {
 }
 
 impl PgSequenceDescriptor {
-    fn parse<D: AppDetails>(reader: &mut SliceReader<D>) -> Result<Self, D> {
+    fn parse<D: BdavAppDetails>(reader: &mut SliceReader<D>) -> Result<Self, D> {
         let bits = reader.read_u8()?;
         Ok(Self {
             first_in_seq: bits & 0x80 != 0,
@@ -254,7 +369,7 @@ pub struct IgWindow {
 }
 
 impl IgWindow {
-    fn parse<D: AppDetails>(reader: &mut SliceReader<D>) -> Result<Self, D> {
+    fn parse<D: BdavAppDetails>(reader: &mut SliceReader<D>) -> Result<Self, D> {
         let id = reader.read_u8()?;
         let x = reader.read_be_u16()?;
         let y = reader.read_be_u16()?;
@@ -284,7 +399,7 @@ pub struct PgCrop {
 }
 
 impl PgCrop {
-    fn parse<D: AppDetails>(reader: &mut SliceReader<D>) -> Result<Self, D> {
+    fn parse<D: BdavAppDetails>(reader: &mut SliceReader<D>) -> Result<Self, D> {
         let x = reader.read_be_u16()?;
         let y = reader.read_be_u16()?;
         let w = reader.read_be_u16()?;
@@ -311,7 +426,7 @@ pub struct PgCompositionObject {
 }
 
 impl PgCompositionObject {
-    fn parse<D: AppDetails>(reader: &mut SliceReader<D>) -> Result<Self, D> {
+    fn parse<D: BdavAppDetails>(reader: &mut SliceReader<D>) -> Result<Self, D> {
         let object_id_ref = reader.read_be_u16()?;
         let window_id_ref = reader.read_u8()?;
         let bits = reader.read_u8()?;
@@ -345,7 +460,7 @@ pub struct IgEffect {
 }
 
 impl IgEffect {
-    fn parse<D: AppDetails>(reader: &mut SliceReader<D>) -> Result<Self, D> {
+    fn parse<D: BdavAppDetails>(reader: &mut SliceReader<D>) -> Result<Self, D> {
         let duration = reader.read_be_u24()?;
         let palette_id_ref = reader.read_u8()?;
         let num_composition_objects = reader.read_u8()?;
@@ -371,7 +486,7 @@ pub struct IgEffectSequence {
 }
 
 impl IgEffectSequence {
-    fn parse<D: AppDetails>(reader: &mut SliceReader<D>) -> Result<Self, D> {
+    fn parse<D: BdavAppDetails>(reader: &mut SliceReader<D>) -> Result<Self, D> {
         let num_windows = reader.read_u8()?;
         let mut windows = Vec::with_capacity(num_windows as usize);
         for _ in 0..num_windows {
@@ -432,7 +547,7 @@ pub struct IgButton {
 }
 
 impl IgButton {
-    fn parse<D: AppDetails>(reader: &mut SliceReader<D>) -> Result<Self, D> {
+    fn parse<D: BdavAppDetails>(reader: &mut SliceReader<D>) -> Result<Self, D> {
         let id = reader.read_be_u16()?;
         let numeric_select_value = reader.read_be_u16()?;
         let auto_action_flag = reader.read_u8()? & 0x80 != 0;
@@ -492,7 +607,7 @@ pub struct IgBog {
 }
 
 impl IgBog {
-    fn parse<D: AppDetails>(reader: &mut SliceReader<D>) -> Result<Self, D> {
+    fn parse<D: BdavAppDetails>(reader: &mut SliceReader<D>) -> Result<Self, D> {
         let default_valid_button_id_ref = reader.read_be_u16()?;
         let num_buttons = reader.read_u8()?;
         let mut buttons = Vec::with_capacity(num_buttons as usize);
@@ -532,7 +647,7 @@ pub struct IgPage {
 }
 
 impl IgPage {
-    fn parse<D: AppDetails>(reader: &mut SliceReader<D>) -> Result<Self, D> {
+    fn parse<D: BdavAppDetails>(reader: &mut SliceReader<D>) -> Result<Self, D> {
         let id = reader.read_u8()?;
         let version = reader.read_u8()?;
         let uo_mask = read_bitfield!(reader, UoMask);
@@ -564,7 +679,7 @@ impl IgPage {
 
 /// UI Model used in an [`IgInteractiveComposition`].
 #[repr(u8)]
-#[derive(Debug, FromPrimitive)]
+#[derive(Debug)]
 pub enum IgUiModel {
     /// Always on menu.
     AlwaysOn,
@@ -590,7 +705,7 @@ pub struct IgInteractiveComposition {
 }
 
 impl IgInteractiveComposition {
-    fn parse<D: AppDetails>(reader: &mut SliceReader<D>) -> Result<Self, D> {
+    fn parse<D: BdavAppDetails>(reader: &mut SliceReader<D>) -> Result<Self, D> {
         let data_len = reader.read_be_u24()?;
         let mut sub_reader = reader.new_sub_reader(data_len as usize)?;
         let model_bits = sub_reader.read_u8()?;
@@ -633,14 +748,17 @@ pub struct PgsIgComposition {
     pub video_descriptor: PgVideoDescriptor,
     /// Information about the sequence of PES units that make up the composition.
     pub composition_descriptor: PgCompositionDescriptor,
-    /// Flags that indicate the position of a composition in sequence.
+    /// Flags that indicate the position of a segment split across multiple units.
     pub sequence_descriptor: PgSequenceDescriptor,
     /// The composition tree.
     pub interactive_composition: IgInteractiveComposition,
 }
 
 impl PgsIgComposition {
-    fn parse<D: AppDetails>(reader: &mut SliceReader<D>) -> Result<Self, D> {
+    fn parse<D: BdavAppDetails>(
+        reader: &mut SliceReader<D>,
+        storage: &mut BdavParserStorage,
+    ) -> Result<Self, D> {
         let video_descriptor = PgVideoDescriptor::parse(reader)?;
         let composition_descriptor = PgCompositionDescriptor::parse(reader)?;
         let sequence_descriptor = PgSequenceDescriptor::parse(reader)?;
@@ -659,7 +777,10 @@ impl PgsIgComposition {
 pub struct PgsEndOfDisplay {}
 
 impl PgsEndOfDisplay {
-    fn parse<D: AppDetails>(reader: &mut SliceReader<D>) -> Result<Self, D> {
+    fn parse<D: BdavAppDetails>(
+        reader: &mut SliceReader<D>,
+        storage: &mut BdavParserStorage,
+    ) -> Result<Self, D> {
         Ok(Self {})
     }
 }
@@ -669,7 +790,10 @@ impl PgsEndOfDisplay {
 pub struct TgsDialogStyle {}
 
 impl TgsDialogStyle {
-    fn parse<D: AppDetails>(reader: &mut SliceReader<D>) -> Result<Self, D> {
+    fn parse<D: BdavAppDetails>(
+        reader: &mut SliceReader<D>,
+        storage: &mut BdavParserStorage,
+    ) -> Result<Self, D> {
         Ok(Self {})
     }
 }
@@ -679,7 +803,10 @@ impl TgsDialogStyle {
 pub struct TgsDialogPresentation {}
 
 impl TgsDialogPresentation {
-    fn parse<D: AppDetails>(reader: &mut SliceReader<D>) -> Result<Self, D> {
+    fn parse<D: BdavAppDetails>(
+        reader: &mut SliceReader<D>,
+        storage: &mut BdavParserStorage,
+    ) -> Result<Self, D> {
         Ok(Self {})
     }
 }
@@ -690,7 +817,7 @@ macro_rules! pg_segment_data {
         @collect_unitary_variants
         ($(,)*) -> ($($(#[$vattr:meta])* $var:ident = $val:expr,)*)
     ) => {
-        /// A PES unit that starts with raw data and gets converted to parsed form at end.
+        /// A PES unit that starts with raw data and is converted to parsed form at end.
         #[derive(Debug)]
         pub enum PgSegmentData {
             /// Unparsed PES payload data for accumulating packets.
@@ -698,13 +825,13 @@ macro_rules! pg_segment_data {
             $($(#[$vattr])* $var($var),)*
         }
 
-        fn parse_pg_segment_data<D: BdavAppDetails>(reader: &mut SliceReader<D>) -> Result<PgSegmentData, D> {
+        fn parse_pg_segment_data<D: BdavAppDetails>(reader: &mut SliceReader<D>, storage: &mut BdavParserStorage) -> Result<PgSegmentData, D> {
             let seg_type = reader.read_u8()?;
             let seg_length = reader.read_be_u16()?;
             let mut seg_reader = reader.new_sub_reader(seg_length as usize)?;
 
             let ret = match seg_type {
-                $($val => Ok(PgSegmentData::$var($var::parse(&mut seg_reader)?)),)*
+                $($val => Ok(PgSegmentData::$var($var::parse(&mut seg_reader, storage)?)),)*
                 _ => Err(seg_reader.make_error(ErrorDetails::<D>::AppError(BdavErrorDetails::UnknownPgSegmentType(seg_type))))
             };
 
@@ -772,7 +899,10 @@ impl<D: BdavAppDetails> PesUnitObject<D> for PgSegmentData {
 
     fn finish(&mut self, pid: u16, parser: &mut MpegTsParser<D>) -> Result<(), D> {
         if let PgSegmentData::Raw(data) = self {
-            *self = parse_pg_segment_data(&mut SliceReader::new(data.as_slice()))?;
+            *self = parse_pg_segment_data(
+                &mut SliceReader::new(data.as_slice()),
+                &mut parser.app_parser_storage,
+            )?;
             Ok(())
         } else {
             panic!("PgSegmentData must be raw before finishing")
