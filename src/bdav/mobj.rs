@@ -199,12 +199,6 @@ pub enum MObjGroup {
     Set,
 }
 
-impl Default for MObjGroup {
-    fn default() -> Self {
-        MObjGroup::Branch
-    }
-}
-
 /// Branch instruction group.
 #[repr(u8)]
 #[derive(Debug, Copy, Clone, PartialEq, FromPrimitive)]
@@ -215,12 +209,6 @@ pub enum BranchSubGroup {
     Jump,
     /// Selects [`PlayInstruction`].
     Play,
-}
-
-impl Default for BranchSubGroup {
-    fn default() -> Self {
-        BranchSubGroup::Goto
-    }
 }
 
 instruction_enum! {
@@ -297,12 +285,6 @@ pub enum SetSubGroup {
     Set,
     /// Selects [`SetSystemInstruction`].
     SetSystem,
-}
-
-impl Default for SetSubGroup {
-    fn default() -> Self {
-        SetSubGroup::Set
-    }
 }
 
 instruction_enum! {
