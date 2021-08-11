@@ -33,21 +33,6 @@ fn from_primitive_map_err<
     }
 }
 
-fn from_primitive_read_u8<
-    D: BdavAppDetails,
-    T: num_traits::FromPrimitive,
-    F: FnOnce(u8) -> BdavErrorDetails,
->(
-    reader: &mut SliceReader<D>,
-    err_fn: F,
-) -> Result<T, D> {
-    let val = reader.read_u8()?;
-    match FromPrimitive::from_u8(val) {
-        Some(v) => Ok(v),
-        None => Err(reader.make_error(ErrorDetails::AppError(err_fn(val)))),
-    }
-}
-
 /// BDAV-specific header prepended to MPEG-TS packets
 #[bitfield]
 #[derive(Debug)]
@@ -80,6 +65,16 @@ pub enum BdavErrorDetails {
     BadMObjCommand(MObjCmdErrorDetails),
     /// Encountered an non-started PgsObject fragment.
     NonStartedPgsObject,
+    /// Encountered an non-started PgsIgComposition fragment.
+    NonStartedPgsIgComposition,
+    /// Encountered an unknown [`TgTextFlow`].
+    UnknownTgTextFlow(u8),
+    /// Encountered an unknown [`TgHAlign`].
+    UnknownTgHAlign(u8),
+    /// Encountered an unknown [`TgVAlign`].
+    UnknownTgVAlign(u8),
+    /// Encountered an unknown [`TgOutlineThickness`].
+    UnknownTgOutlineThickness(u8),
 }
 
 /// Cross-payload state for BDAV parsing.

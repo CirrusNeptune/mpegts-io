@@ -2,13 +2,15 @@
 //! in Blu-Ray subtitles and menus.
 
 use super::{
-    from_primitive_map_err, from_primitive_read_u8, mobj::MObjCmd, read_bitfield, BdavAppDetails,
-    BdavErrorDetails, BdavParserStorage, MpegTsParser, PesUnitObject, SliceReader,
+    from_primitive_map_err, mobj::MObjCmd, read_bitfield, BdavAppDetails, BdavErrorDetails,
+    BdavParserStorage, MpegTsParser, PesUnitObject, SliceReader,
 };
 use crate::{ErrorDetails, Result};
 use log::warn;
 use modular_bitfield_msb::prelude::*;
 use num_derive::FromPrimitive;
+use smallvec::SmallVec;
+use std::cmp::min;
 use std::fmt::{Debug, Formatter};
 
 /// A YCbCrA palette entry.
@@ -122,7 +124,9 @@ impl PgsObject {
         if sequence_descriptor.first_in_seq && sequence_descriptor.last_in_seq {
             // Single-fragment case; immediately parse data.
             let length = reader.read_be_u24()? as usize;
-            assert_eq!(reader.remaining_len(), length);
+            if reader.remaining_len() > length {
+                warn!("Unexpectedly long PgsObject data; truncating");
+            }
             Ok(Self {
                 id,
                 version,
@@ -136,8 +140,10 @@ impl PgsObject {
             }
             let length = reader.read_be_u24()?;
             let mut data = Vec::with_capacity(length as usize);
-            assert!(reader.remaining_len() <= data.capacity());
-            data.extend_from_slice(reader.read_to_end()?);
+            if reader.remaining_len() > data.capacity() {
+                warn!("Unexpectedly long PgsObject data; truncating");
+            }
+            data.extend_from_slice(reader.read(min(reader.remaining_len(), data.capacity()))?);
             storage.pending_obj_segments.insert(key, data);
             Ok(Self {
                 id,
@@ -149,8 +155,12 @@ impl PgsObject {
             // Intermediate fragment of many.
             match storage.pending_obj_segments.get_mut(&key) {
                 Some(mut data) => {
-                    assert!(data.len() + reader.remaining_len() <= data.capacity());
-                    data.extend_from_slice(reader.read_to_end()?);
+                    if data.len() + reader.remaining_len() > data.capacity() {
+                        warn!("Unexpectedly long PgsObject data; truncating");
+                    }
+                    data.extend_from_slice(
+                        reader.read(min(reader.remaining_len(), data.capacity() - data.len()))?,
+                    );
                     Ok(Self {
                         id,
                         version,
@@ -166,8 +176,12 @@ impl PgsObject {
             // Final fragment of many.
             match storage.pending_obj_segments.remove(&key) {
                 Some(mut data) => {
-                    assert_eq!(data.len() + reader.remaining_len(), data.capacity());
-                    data.extend_from_slice(reader.read_to_end()?);
+                    if data.len() + reader.remaining_len() > data.capacity() {
+                        warn!("Unexpectedly long PgsObject data; truncating");
+                    }
+                    data.extend_from_slice(
+                        reader.read(min(reader.remaining_len(), data.capacity() - data.len()))?,
+                    );
                     Ok(Self {
                         id,
                         version,
@@ -185,27 +199,63 @@ impl PgsObject {
 
 /// A program graphics composition.
 #[derive(Debug)]
-pub struct PgsPgComposition {}
+pub struct PgsPgComposition {
+    /// Viewport and frame rate information.
+    pub video_descriptor: PgVideoDescriptor,
+    /// Information about the sequence of PES units that make up the composition.
+    pub composition_descriptor: PgCompositionDescriptor,
+    /// Indicates that only the palette has changed.
+    pub palette_update_flag: bool,
+    /// [`PgsPalette`] object ID.
+    pub palette_id_ref: u8,
+    /// Positioned [`PgsObject`] elements of the composition.
+    pub composition_objects: Vec<PgCompositionObject>,
+}
 
 impl PgsPgComposition {
     fn parse<D: BdavAppDetails>(
         reader: &mut SliceReader<D>,
         storage: &mut BdavParserStorage,
     ) -> Result<Self, D> {
-        Ok(Self {})
+        let video_descriptor = PgVideoDescriptor::parse(reader)?;
+        let composition_descriptor = PgCompositionDescriptor::parse(reader)?;
+        let palette_update_flag = reader.read_u8()? & 0x80 != 0;
+        let palette_id_ref = reader.read_u8()?;
+
+        let num_composition_objects = reader.read_u8()?;
+        let mut composition_objects = Vec::with_capacity(num_composition_objects as usize);
+        for _ in 0..num_composition_objects {
+            composition_objects.push(PgCompositionObject::parse(reader)?);
+        }
+
+        Ok(Self {
+            video_descriptor,
+            composition_descriptor,
+            palette_update_flag,
+            palette_id_ref,
+            composition_objects,
+        })
     }
 }
 
-/// TODO: Document me
+/// A collection of windows for referencing by [`PgCompositionObject`] objects.
 #[derive(Debug)]
-pub struct PgsWindow {}
+pub struct PgsWindow {
+    /// Windows in the collection.
+    pub windows: Vec<PgWindow>,
+}
 
 impl PgsWindow {
     fn parse<D: BdavAppDetails>(
         reader: &mut SliceReader<D>,
         storage: &mut BdavParserStorage,
     ) -> Result<Self, D> {
-        Ok(Self {})
+        let num_windows = reader.read_u8()?;
+        let mut windows = Vec::with_capacity(num_windows as usize);
+        for _ in 0..num_windows {
+            windows.push(PgWindow::parse(reader)?);
+        }
+        Ok(Self { windows })
     }
 }
 
@@ -258,7 +308,7 @@ impl PgVideoDescriptor {
 
 /// Streaming information about a PG PES unit.
 #[repr(u8)]
-#[derive(Debug, FromPrimitive)]
+#[derive(Debug, PartialEq, Eq, Hash, Clone, FromPrimitive)]
 pub enum PgCompositionUnitState {
     /// An object that adds to the composition being streamed.
     Incremental,
@@ -269,9 +319,9 @@ pub enum PgCompositionUnitState {
 }
 
 /// Information about the sequence of PES units that make up a composition.
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq, Hash, Clone)]
 pub struct PgCompositionDescriptor {
-    /// Number of PES units (palettes, objects, windows).
+    /// Unique identifier of composition for assembling unit fragments.
     pub number: u16,
     /// Streaming information about a PG PES unit.
     pub state: PgCompositionUnitState,
@@ -355,7 +405,7 @@ pub struct UoMask {
 /// Sub-rectangle in a composition for positioning [`PgCompositionObject`] objects in an
 /// [`IgEffectSequence`] or for [`PgsWindow`] objects within a [`PgsPgComposition`].
 #[derive(Debug)]
-pub struct IgWindow {
+pub struct PgWindow {
     /// Window ID.
     pub id: u8,
     /// X pos.
@@ -368,7 +418,7 @@ pub struct IgWindow {
     pub height: u16,
 }
 
-impl IgWindow {
+impl PgWindow {
     fn parse<D: BdavAppDetails>(reader: &mut SliceReader<D>) -> Result<Self, D> {
         let id = reader.read_u8()?;
         let x = reader.read_be_u16()?;
@@ -480,7 +530,7 @@ impl IgEffect {
 #[derive(Debug)]
 pub struct IgEffectSequence {
     /// Windows for composition objects contained in effects.
-    pub windows: Vec<IgWindow>,
+    pub windows: Vec<PgWindow>,
     /// Timed composition objects for the effect sequence.
     pub effects: Vec<IgEffect>,
 }
@@ -490,7 +540,7 @@ impl IgEffectSequence {
         let num_windows = reader.read_u8()?;
         let mut windows = Vec::with_capacity(num_windows as usize);
         for _ in 0..num_windows {
-            windows.push(IgWindow::parse(reader)?);
+            windows.push(PgWindow::parse(reader)?);
         }
         let num_effects = reader.read_u8()?;
         let mut effects = Vec::with_capacity(num_effects as usize);
@@ -706,24 +756,22 @@ pub struct IgInteractiveComposition {
 
 impl IgInteractiveComposition {
     fn parse<D: BdavAppDetails>(reader: &mut SliceReader<D>) -> Result<Self, D> {
-        let data_len = reader.read_be_u24()?;
-        let mut sub_reader = reader.new_sub_reader(data_len as usize)?;
-        let model_bits = sub_reader.read_u8()?;
+        let model_bits = reader.read_u8()?;
         let stream_model = model_bits & 0x80 != 0;
         let (composition_timeout_pts, selection_timeout_pts) = if !stream_model {
-            let composition_timeout_pts = sub_reader.read_be_u33()?;
-            let selection_timeout_pts = sub_reader.read_be_u33()?;
+            let composition_timeout_pts = reader.read_be_u33()?;
+            let selection_timeout_pts = reader.read_be_u33()?;
             (Some(composition_timeout_pts), Some(selection_timeout_pts))
         } else {
             (None, None)
         };
-        let user_timeout_duration = sub_reader.read_be_u24()?;
-        let num_pages = sub_reader.read_u8()?;
+        let user_timeout_duration = reader.read_be_u24()?;
+        let num_pages = reader.read_u8()?;
         let mut pages = Vec::with_capacity(num_pages as usize);
         for _ in 0..num_pages {
-            pages.push(IgPage::parse(&mut sub_reader)?);
+            pages.push(IgPage::parse(reader)?);
         }
-        if sub_reader.remaining_len() != 0 {
+        if reader.remaining_len() != 0 {
             warn!("entire ig interactive composition not read");
         }
         Ok(Self {
@@ -750,8 +798,8 @@ pub struct PgsIgComposition {
     pub composition_descriptor: PgCompositionDescriptor,
     /// Flags that indicate the position of a segment split across multiple units.
     pub sequence_descriptor: PgSequenceDescriptor,
-    /// The composition tree.
-    pub interactive_composition: IgInteractiveComposition,
+    /// Parsed data after segment fragments are reassembled.
+    pub interactive_composition: Option<IgInteractiveComposition>,
 }
 
 impl PgsIgComposition {
@@ -762,13 +810,90 @@ impl PgsIgComposition {
         let video_descriptor = PgVideoDescriptor::parse(reader)?;
         let composition_descriptor = PgCompositionDescriptor::parse(reader)?;
         let sequence_descriptor = PgSequenceDescriptor::parse(reader)?;
-        let interactive_composition = IgInteractiveComposition::parse(reader)?;
-        Ok(Self {
-            video_descriptor,
-            composition_descriptor,
-            sequence_descriptor,
-            interactive_composition,
-        })
+
+        if sequence_descriptor.first_in_seq && sequence_descriptor.last_in_seq {
+            // Single-fragment case; immediately parse data.
+            let length = reader.read_be_u24()? as usize;
+            if reader.remaining_len() > length {
+                warn!("Unexpectedly long PgsIgComposition data; truncating");
+            }
+            Ok(Self {
+                video_descriptor,
+                composition_descriptor,
+                sequence_descriptor,
+                interactive_composition: Some(IgInteractiveComposition::parse(reader)?),
+            })
+        } else if sequence_descriptor.first_in_seq {
+            // First fragment of many.
+            if storage
+                .pending_ig_segments
+                .contains_key(&composition_descriptor)
+            {
+                warn!(
+                    "Discarding pending PgsIgComposition({:?})",
+                    composition_descriptor
+                );
+            }
+            let length = reader.read_be_u24()?;
+            let mut data = Vec::with_capacity(length as usize);
+            if reader.remaining_len() > data.capacity() {
+                warn!("Unexpectedly long PgsIgComposition data; truncating");
+            }
+            data.extend_from_slice(reader.read(min(reader.remaining_len(), data.capacity()))?);
+            storage
+                .pending_ig_segments
+                .insert(composition_descriptor.clone(), data);
+            Ok(Self {
+                video_descriptor,
+                composition_descriptor,
+                sequence_descriptor,
+                interactive_composition: None,
+            })
+        } else if !sequence_descriptor.first_in_seq && !sequence_descriptor.last_in_seq {
+            // Intermediate fragment of many.
+            match storage.pending_ig_segments.get_mut(&composition_descriptor) {
+                Some(mut data) => {
+                    if data.len() + reader.remaining_len() > data.capacity() {
+                        warn!("Unexpectedly long PgsIgComposition data; truncating");
+                    }
+                    data.extend_from_slice(
+                        reader.read(min(reader.remaining_len(), data.capacity() - data.len()))?,
+                    );
+                    Ok(Self {
+                        video_descriptor,
+                        composition_descriptor,
+                        sequence_descriptor,
+                        interactive_composition: None,
+                    })
+                }
+                None => Err(reader.make_error(ErrorDetails::AppError(
+                    BdavErrorDetails::NonStartedPgsIgComposition,
+                ))),
+            }
+        } else {
+            // Final fragment of many.
+            match storage.pending_ig_segments.remove(&composition_descriptor) {
+                Some(mut data) => {
+                    if data.len() + reader.remaining_len() > data.capacity() {
+                        warn!("Unexpectedly long PgsIgComposition data; truncating");
+                    }
+                    data.extend_from_slice(
+                        reader.read(min(reader.remaining_len(), data.capacity() - data.len()))?,
+                    );
+                    Ok(Self {
+                        video_descriptor,
+                        composition_descriptor,
+                        sequence_descriptor,
+                        interactive_composition: Some(IgInteractiveComposition::parse(
+                            &mut SliceReader::new(&data),
+                        )?),
+                    })
+                }
+                None => Err(reader.make_error(ErrorDetails::AppError(
+                    BdavErrorDetails::NonStartedPgsIgComposition,
+                ))),
+            }
+        }
     }
 }
 
@@ -785,29 +910,376 @@ impl PgsEndOfDisplay {
     }
 }
 
-/// TODO: Document me.
+/// Filled background rectangle for presenting text.
 #[derive(Debug)]
-pub struct TgsDialogStyle {}
+pub struct TgRegionInfo {
+    /// Rectangle region.
+    pub region: TgRect,
+    /// Background palette index.
+    pub background_color: u8,
+}
+
+impl TgRegionInfo {
+    fn parse<D: BdavAppDetails>(reader: &mut SliceReader<D>) -> Result<Self, D> {
+        let region = TgRect::parse(reader)?;
+        let background_color = reader.read_u8()?;
+        reader.skip(1)?;
+        Ok(Self {
+            region,
+            background_color,
+        })
+    }
+}
+
+/// Rectangle dimensions.
+#[derive(Debug)]
+pub struct TgRect {
+    /// X Pos.
+    pub xpos: u16,
+    /// Y Pos.
+    pub ypos: u16,
+    /// Width.
+    pub width: u16,
+    /// Height.
+    pub height: u16,
+}
+
+impl TgRect {
+    fn parse<D: BdavAppDetails>(reader: &mut SliceReader<D>) -> Result<Self, D> {
+        let xpos = reader.read_be_u16()?;
+        let ypos = reader.read_be_u16()?;
+        let width = reader.read_be_u16()?;
+        let height = reader.read_be_u16()?;
+        Ok(Self {
+            xpos,
+            ypos,
+            width,
+            height,
+        })
+    }
+}
+
+/// Text flow.
+#[repr(u8)]
+#[derive(Debug, FromPrimitive)]
+pub enum TgTextFlow {
+    /// Left-to-right, top-to-bottom.
+    LeftRight = 1,
+    /// Right-to-left, top-to-bottom.
+    RightLeft = 2,
+    /// Top-to-bottom, right-to-left.
+    TopBottom = 3,
+}
+
+/// Text horizontal alignment.
+#[repr(u8)]
+#[derive(Debug, FromPrimitive)]
+pub enum TgHAlign {
+    /// Left alignment.
+    Left = 1,
+    /// Center alignment.
+    Center = 2,
+    /// Right alignment.
+    Right = 3,
+}
+
+/// Text vertical alignment.
+#[repr(u8)]
+#[derive(Debug, FromPrimitive)]
+pub enum TgVAlign {
+    /// Top alignment.
+    Top = 1,
+    /// Middle alignment.
+    Middle = 2,
+    /// Bottom alignment.
+    Bottom = 3,
+}
+
+/// Text font style bits.
+#[bitfield]
+#[derive(Debug)]
+pub struct TgFontStyle {
+    #[skip]
+    pub padding: B5,
+    pub bold: bool,
+    pub italic: bool,
+    pub outline_border: bool,
+}
+
+/// Text outline thickness.
+#[repr(u8)]
+#[derive(Debug, FromPrimitive)]
+pub enum TgOutlineThickness {
+    /// Thin.
+    Thin = 1,
+    /// Medium.
+    Medium = 2,
+    /// Thick.
+    Thick = 3,
+}
+
+/// Style parameters for a text region.
+#[derive(Debug)]
+pub struct TgRegionStyle {
+    /// Region style ID.
+    pub region_style_id: u8,
+    /// Background rectangle info,
+    pub region_info: TgRegionInfo,
+    /// Text box rectangle.
+    pub text_box: TgRect,
+    /// Text flow.
+    pub text_flow: TgTextFlow,
+    /// Text horizontal alignment.
+    pub text_halign: TgHAlign,
+    /// Text vertical alignment.
+    pub text_valign: TgVAlign,
+    /// Line spacing.
+    pub line_space: u8,
+    /// Font ID.
+    pub font_id_ref: u8,
+    /// Font style bits.
+    pub font_style: TgFontStyle,
+    /// Font size.
+    pub font_size: u8,
+    /// Font color palette index.
+    pub font_color: u8,
+    /// Outline color palette index.
+    pub outline_color: u8,
+    /// Outline thickness.
+    pub outline_thickness: TgOutlineThickness,
+}
+
+impl TgRegionStyle {
+    fn parse<D: BdavAppDetails>(reader: &mut SliceReader<D>) -> Result<Self, D> {
+        let region_style_id = reader.read_u8()?;
+        let region_info = TgRegionInfo::parse(reader)?;
+        let text_box = TgRect::parse(reader)?;
+        let text_flow = from_primitive_map_err(reader.read_u8()?, |v| {
+            reader.make_error(ErrorDetails::AppError(BdavErrorDetails::UnknownTgTextFlow(
+                v,
+            )))
+        })?;
+        let text_halign = from_primitive_map_err(reader.read_u8()?, |v| {
+            reader.make_error(ErrorDetails::AppError(BdavErrorDetails::UnknownTgHAlign(v)))
+        })?;
+        let text_valign = from_primitive_map_err(reader.read_u8()?, |v| {
+            reader.make_error(ErrorDetails::AppError(BdavErrorDetails::UnknownTgVAlign(v)))
+        })?;
+        let line_space = reader.read_u8()?;
+        let font_id_ref = reader.read_u8()?;
+        let font_style = read_bitfield!(reader, TgFontStyle);
+        let font_size = reader.read_u8()?;
+        let font_color = reader.read_u8()?;
+        let outline_color = reader.read_u8()?;
+        let outline_thickness = from_primitive_map_err(reader.read_u8()?, |v| {
+            reader.make_error(ErrorDetails::AppError(
+                BdavErrorDetails::UnknownTgOutlineThickness(v),
+            ))
+        })?;
+        Ok(Self {
+            region_style_id,
+            region_info,
+            text_box,
+            text_flow,
+            text_halign,
+            text_valign,
+            line_space,
+            font_id_ref,
+            font_style,
+            font_size,
+            font_color,
+            outline_color,
+            outline_thickness,
+        })
+    }
+}
+
+/// TODO: Document me.
+#[allow(missing_docs)]
+#[derive(Debug)]
+pub struct TgUserStyle {
+    pub user_style_id: u8,
+    pub region_hpos_delta: i16,
+    pub region_vpos_delta: i16,
+    pub text_box_hpos_delta: i16,
+    pub text_box_vpos_delta: i16,
+    pub text_box_width_delta: i16,
+    pub text_box_height_delta: i16,
+    pub font_size_delta: i8,
+    pub line_space_delta: i8,
+}
+
+impl TgUserStyle {
+    fn parse<D: BdavAppDetails>(reader: &mut SliceReader<D>) -> Result<Self, D> {
+        let user_style_id = reader.read_u8()?;
+        let region_hpos_delta = reader.read_be_sm16()?;
+        let region_vpos_delta = reader.read_be_sm16()?;
+        let text_box_hpos_delta = reader.read_be_sm16()?;
+        let text_box_vpos_delta = reader.read_be_sm16()?;
+        let text_box_width_delta = reader.read_be_sm16()?;
+        let text_box_height_delta = reader.read_be_sm16()?;
+        let font_size_delta = reader.read_sm8()?;
+        let line_space_delta = reader.read_sm8()?;
+        Ok(Self {
+            user_style_id,
+            region_hpos_delta,
+            region_vpos_delta,
+            text_box_hpos_delta,
+            text_box_vpos_delta,
+            text_box_width_delta,
+            text_box_height_delta,
+            font_size_delta,
+            line_space_delta,
+        })
+    }
+}
+
+fn read_palette_entries<D: BdavAppDetails>(
+    reader: &mut SliceReader<D>,
+) -> Result<Box<[PgsPaletteEntry; 256]>, D> {
+    let mut palette_entries = Box::new([PgsPaletteEntry::default(); 256]);
+    let num_palette_entries = reader.read_be_u16()? / 5;
+    for _ in 0..num_palette_entries {
+        let entry = &mut palette_entries[reader.read_u8()? as usize];
+        entry.y = reader.read_u8()?;
+        entry.cr = reader.read_u8()?;
+        entry.cb = reader.read_u8()?;
+        entry.t = reader.read_u8()?;
+    }
+    Ok(palette_entries)
+}
+
+/// Container of text styles.
+#[derive(Debug)]
+pub struct TgDialogStyle {
+    /// Unknown
+    pub player_style_flag: bool,
+    /// Text region styles.
+    pub region_styles: Vec<TgRegionStyle>,
+    /// Text user styles.
+    pub user_styles: Vec<TgUserStyle>,
+    /// 256 palette entries
+    pub palette_entries: Box<[PgsPaletteEntry; 256]>,
+}
+
+impl TgDialogStyle {
+    fn parse<D: BdavAppDetails>(reader: &mut SliceReader<D>) -> Result<Self, D> {
+        let player_style_flag = reader.read_be_u16()? & 0x8000 != 0;
+
+        let num_region_styles = reader.read_u8()?;
+        let mut region_styles = Vec::with_capacity(num_region_styles as usize);
+        for _ in 0..num_region_styles {
+            region_styles.push(TgRegionStyle::parse(reader)?);
+        }
+
+        let num_user_styles = reader.read_u8()?;
+        let mut user_styles = Vec::with_capacity(num_user_styles as usize);
+        for _ in 0..num_user_styles {
+            user_styles.push(TgUserStyle::parse(reader)?);
+        }
+
+        let palette_entries = read_palette_entries(reader)?;
+
+        Ok(Self {
+            player_style_flag,
+            region_styles,
+            user_styles,
+            palette_entries,
+        })
+    }
+}
+
+/// Set of dialog styles.
+#[derive(Debug)]
+pub struct TgsDialogStyle {
+    /// Styles of the dialogs.
+    pub style: TgDialogStyle,
+    /// Total count of dialogs in stream.
+    pub num_dialogs: u16,
+}
 
 impl TgsDialogStyle {
     fn parse<D: BdavAppDetails>(
         reader: &mut SliceReader<D>,
         storage: &mut BdavParserStorage,
     ) -> Result<Self, D> {
-        Ok(Self {})
+        let style = TgDialogStyle::parse(reader)?;
+        let num_dialogs = reader.read_be_u16()?;
+        Ok(Self { style, num_dialogs })
     }
 }
 
-/// TODO: Document me.
+/// A presentation of one dialog region.
 #[derive(Debug)]
-pub struct TgsDialogPresentation {}
+pub struct TgDialogRegion {
+    /// Unknown
+    pub continuous_present_flag: bool,
+    /// Unknown
+    pub forced_on_flag: bool,
+    /// Region style ID.
+    pub region_style_id_ref: u8,
+    /// Data of presentation (TODO parse formatting tags)
+    pub data: Vec<u8>,
+}
+
+impl TgDialogRegion {
+    fn parse<D: BdavAppDetails>(reader: &mut SliceReader<D>) -> Result<Self, D> {
+        let bits = reader.read_u8()?;
+        let continuous_present_flag = bits & 0x80 != 0;
+        let forced_on_flag = bits & 0x40 != 0;
+        let region_style_id_ref = reader.read_u8()?;
+        let data_length = reader.read_be_u16()? as usize;
+        let mut data = Vec::with_capacity(data_length);
+        data.extend_from_slice(reader.read(data_length)?);
+        Ok(Self {
+            continuous_present_flag,
+            forced_on_flag,
+            region_style_id_ref,
+            data,
+        })
+    }
+}
+
+/// Presentable text instance.
+#[derive(Debug)]
+pub struct TgsDialogPresentation {
+    /// Start timecode.
+    pub start_pts: u64,
+    /// End timecode.
+    pub end_pts: u64,
+    /// Optional palette update.
+    pub palette_update: Option<Box<[PgsPaletteEntry; 256]>>,
+    /// Up to 2 regions to present.
+    pub regions: SmallVec<[TgDialogRegion; 2]>,
+}
 
 impl TgsDialogPresentation {
     fn parse<D: BdavAppDetails>(
         reader: &mut SliceReader<D>,
         storage: &mut BdavParserStorage,
     ) -> Result<Self, D> {
-        Ok(Self {})
+        let start_pts = reader.read_be_u33()?;
+        let end_pts = reader.read_be_u33()?;
+        let has_palette_update = reader.read_u8()? & 0x80 != 0;
+        let palette_update = if has_palette_update {
+            Some(read_palette_entries(reader)?)
+        } else {
+            None
+        };
+        let region_count = reader.read_u8()?;
+        if region_count > 2 {
+            warn!("too many TgDialogRegions");
+        }
+        let mut regions = SmallVec::new();
+        for _ in 0..min(region_count, 2) {
+            regions.push(TgDialogRegion::parse(reader)?);
+        }
+        Ok(Self {
+            start_pts,
+            end_pts,
+            palette_update,
+            regions,
+        })
     }
 }
 

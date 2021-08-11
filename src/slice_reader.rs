@@ -102,9 +102,25 @@ impl<'a, D: AppDetails> SliceReader<'a, D> {
         Ok(self.read_array_ref::<1>()?[0])
     }
 
+    /// Read one byte interpreted as [`i8`] sign-magnitude.
+    pub fn read_sm8(&mut self) -> Result<i8, D> {
+        let byte = *self.read_array_ref::<1>()?;
+        let sign = byte[0] & 0x80 != 0;
+        let magnitude = (byte[0] & 0x7f) as i8;
+        Ok(if sign { -magnitude } else { magnitude })
+    }
+
     /// Read two bytes interpreted as big-endian [`u16`].
     pub fn read_be_u16(&mut self) -> Result<u16, D> {
         Ok(u16::from_be_bytes(*self.read_array_ref::<2>()?))
+    }
+
+    /// Read two bytes interpreted as big-endian [`i16`] sign-magnitude.
+    pub fn read_be_sm16(&mut self) -> Result<i16, D> {
+        let bytes = *self.read_array_ref::<2>()?;
+        let sign = bytes[0] & 0x80 != 0;
+        let magnitude = i16::from_be_bytes([bytes[0] & 0x7f, bytes[1]]);
+        Ok(if sign { -magnitude } else { magnitude })
     }
 
     /// Read three bytes interpreted as big-endian `u24`.
