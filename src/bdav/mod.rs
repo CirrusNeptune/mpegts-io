@@ -15,7 +15,10 @@ use mobj::{MObjCmd, MObjCmdErrorDetails};
 
 pub mod pg;
 use crate::ErrorDetails;
-use pg::{FrameRate, PgCompositionDescriptor, PgCompositionUnitState, PgSegmentData};
+use pg::{
+    FrameRate, PgCompositionDescriptor, PgCompositionUnitState, PgSegmentData, TgHAlign,
+    TgOutlineThickness, TgTextFlow, TgVAlign,
+};
 use std::collections::HashMap;
 
 fn from_primitive_map_err<
